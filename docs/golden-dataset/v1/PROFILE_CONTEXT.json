@@ -1,0 +1,40 @@
+{
+  "schema_version": "golden-v1-profile-context",
+  "profile_id": "synthetic-golden-v1",
+  "profile_version": 1,
+  "frozen_at": "2026-01-01",
+  "purpose": "Synthetic benchmark context. It contains no real candidate claims.",
+  "career_facts": [
+    {
+      "fact_id": "synthetic-applied-ai",
+      "statement": "Built Python services for synthetic Applied AI product scenarios.",
+      "provenance": "SYNTHETIC TEST DATA"
+    },
+    {
+      "fact_id": "synthetic-agent-workflows",
+      "statement": "Designed synthetic agent workflows with tool use, guardrails and evaluation.",
+      "provenance": "SYNTHETIC TEST DATA"
+    },
+    {
+      "fact_id": "synthetic-validation",
+      "statement": "Evaluated synthetic ML and LLM systems with automated checks and human review.",
+      "provenance": "SYNTHETIC TEST DATA"
+    },
+    {
+      "fact_id": "synthetic-software",
+      "statement": "Used Python, SQL, APIs, Docker and automated tests in synthetic project examples.",
+      "provenance": "SYNTHETIC TEST DATA"
+    }
+  ],
+  "current_cv_evidence": [
+    "Built synthetic Applied AI services in Python.",
+    "Designed agent workflows with guardrails and evaluation.",
+    "Used SQL, Docker, APIs and automated tests.",
+    "English C1"
+  ],
+  "hard_preferences": [
+    "SYNTHETIC PROFILE: prefer hands-on Applied AI product work.",
+    "SYNTHETIC PROFILE: intensive presales is not preferred.",
+    "SYNTHETIC PROFILE: results must never be used for real job decisions."
+  ]
+}

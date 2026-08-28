@@ -1,0 +1,10 @@
+{
+  "TechCorp": { "ats_type": "smartrecruiters", "url_or_id": "TechCorp" },
+  "StreamFlix": { "ats_type": "workday", "url_or_id": "streamflix" },
+  "BankGlobal": { "ats_type": "workday", "url_or_id": "bankglobal" },
+  "TelecomPlus": { "ats_type": "fallback_jina_ai", "url_or_id": "https://www.example.com/jobs/telecom;kw" },
+  "HealthBio": { "ats_type": "fallback_jina_ai", "url_or_id": "https://www.example.com/jobs/health;kw" },
+  "GovTech": { "ats_type": "erecruiter", "url_or_id": "https://govtech.example.com/careers" },
+  "SearchGiant": { "ats_type": "custom_api", "url_or_id": "https://careers.searchgiant.example.com" },
+  "FinTechApp": { "ats_type": "custom_api", "url_or_id": "https://fintechapp.example.com/careers" }
+}

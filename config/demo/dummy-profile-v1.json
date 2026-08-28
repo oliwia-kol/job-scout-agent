@@ -1,0 +1,55 @@
+{
+  "profile_id": "synthetic-flow-test",
+  "version": 1,
+  "target_roles": [
+    "Applied AI Engineer",
+    "AI Automation Engineer",
+    "AI Evaluation Engineer"
+  ],
+  "evidence": [
+    {
+      "id": "synthetic-llm-products",
+      "statement": "Built and deployed production LLM applications using Python, FastAPI, RAG, vector databases, and cloud infrastructure.",
+      "source": "SYNTHETIC TEST DATA - NOT A REAL CANDIDATE CLAIM"
+    },
+    {
+      "id": "synthetic-agents",
+      "statement": "Designed stateful AI-agent workflows with tool use, guardrails, tracing, and automated evaluation pipelines.",
+      "source": "SYNTHETIC TEST DATA - NOT A REAL CANDIDATE CLAIM"
+    },
+    {
+      "id": "synthetic-ml-validation",
+      "statement": "Validated production machine-learning and generative-AI systems using statistical tests, benchmarks, and human review.",
+      "source": "SYNTHETIC TEST DATA - NOT A REAL CANDIDATE CLAIM"
+    },
+    {
+      "id": "synthetic-software",
+      "statement": "Delivered maintainable backend services with SQL, Docker, Git, CI/CD, testing, monitoring, and API integrations.",
+      "source": "SYNTHETIC TEST DATA - NOT A REAL CANDIDATE CLAIM"
+    },
+    {
+      "id": "synthetic-collaboration",
+      "statement": "Led scoped AI delivery work, translated stakeholder needs into technical plans, and communicated results in English.",
+      "source": "SYNTHETIC TEST DATA - NOT A REAL CANDIDATE CLAIM"
+    }
+  ],
+  "transferable_skills": [
+    "Python software engineering",
+    "LLM and RAG systems",
+    "AI agents and automation",
+    "model evaluation",
+    "cloud deployment"
+  ],
+  "work_preferences": [
+    "remote work from Poland",
+    "practical AI product ownership",
+    "limited presales and travel"
+  ],
+  "negative_criteria": [
+    "SYNTHETIC PROFILE: results must never be used for real job decisions",
+    "intensive presales",
+    "frequent travel"
+  ],
+  "location_rule": "Eligible only when remote from Poland or based in Warsaw area.",
+  "approved_at": "2026-07-13T00:00:00Z"
+}

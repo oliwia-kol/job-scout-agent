@@ -1,0 +1,19 @@
+{
+  "name": "AI Job Scout",
+  "short_name": "Job Scout",
+  "description": "Spokojny, prywatny przewodnik po ofertach i decyzjach zawodowych.",
+  "lang": "pl",
+  "start_url": "/today",
+  "scope": "/",
+  "display": "standalone",
+  "background_color": "#f1f5f0",
+  "theme_color": "#f1f5f0",
+  "icons": [
+    {
+      "src": "/static/icons/scout-mark.svg",
+      "sizes": "any",
+      "type": "image/svg+xml",
+      "purpose": "any maskable"
+    }
+  ]
+}

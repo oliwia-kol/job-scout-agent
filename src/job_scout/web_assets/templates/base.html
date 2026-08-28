@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="pl">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+    <meta name="theme-color" content="#f1f5f0">
+    <meta name="color-scheme" content="light">
+    <meta name="apple-mobile-web-app-capable" content="yes">
+    <meta name="apple-mobile-web-app-status-bar-style" content="default">
+    <meta name="apple-mobile-web-app-title" content="Job Scout">
+    {% if auto_refresh %}<meta http-equiv='refresh' content='5'>{% endif %}
+    <title>{{ title }}</title>
+    <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="icon" href="/static/icons/scout-mark.svg" type="image/svg+xml">
+    <link rel="stylesheet" href="/static/app.css?v=11">
+    <script src="/static/app.js?v=12" defer></script>
+  </head>
+  <body class="shell-{{ shell }}">
+    <a class="skip-link" href="#main-content">Przejdź do treści</a>
+    <header class="app-header">
+      <div class="app-header__inner">
+        <a class="brand" href="{{ '/dev' if shell == 'developer' else '/today' }}"
+           aria-label="AI Job Scout — strona główna">
+          <span class="brand__mark" aria-hidden="true"><i></i><i></i><i></i></span>
+          <span class="brand__copy">
+            <strong>AI Job Scout</strong>
+            <small>{{ 'Developer Workspace' if shell == 'developer' else 'spokojniej do dobrej pracy' }}</small>
+          </span>
+        </a>
+        <nav class="primary-nav" aria-label="{{ 'Narzędzia deweloperskie' if shell == 'developer' else 'Główna' }}">
+          {% for key, href, label in nav_items %}
+          <a href="{{ href }}" data-nav="{{ key }}" {% if key == active %}aria-current="page" class="is-active"{% endif %}>
+            <span class="nav-symbol" aria-hidden="true"></span>{{ label }}
+          </a>
+          {% endfor %}
+        </nav>
+        <div class="shell-switch">
+          {% if shell == "developer" %}
+          <a class="button button--quiet" href="/today">Wróć do produktu</a>
+          {% else %}
+          <nav class="utility-nav" aria-label="Pozostałe">
+            {% for key, href, label in utility_items %}
+            <a href="{{ href }}" data-nav="{{ key }}" {% if key == active %}aria-current="page" class="is-active"{% endif %}>
+              <span class="nav-symbol" aria-hidden="true"></span><span>{{ label }}</span>
+            </a>
+            {% endfor %}
+          </nav>
+          {% endif %}
+        </div>
+      </div>
+      {% if page_title %}
+      <div class="page-heading">
+        <div>
+          {% if eyebrow %}<p class="eyebrow">{{ eyebrow }}</p>{% endif %}
+          <h1>{{ page_title }}</h1>
+        </div>
+        {% if page_actions %}<div class="page-heading__actions">{{ page_actions }}</div>{% endif %}
+      </div>
+      {% endif %}
+    </header>
+    <main id="main-content" tabindex="-1">
+      {{ content }}
+    </main>
+    {% if shell == "product" %}
+    <button class="bielik-fab" type="button" data-bielik-open aria-haspopup="dialog">Bielik</button>
+    <dialog class="bielik-dialog" data-bielik-dialog aria-labelledby="bielik-title">
+      <div class="bielik-dialog__head"><div><p class="eyebrow">Lokalny asystent</p><h2 id="bielik-title">Bielik</h2></div>
+        <button class="dialog-close" type="button" data-bielik-close aria-label="Zamknij">×</button></div>
+      <div class="bielik-transcript" data-bielik-transcript aria-live="polite"></div>
+      <p class="muted" data-bielik-state>Wybierz kontekst: ogólna pomoc, aktywny profil lub oferta.</p>
+      <form class="bielik-composer" data-bielik-form>
+        <textarea data-bielik-input required placeholder="Napisz wiadomość…"></textarea>
+        <button type="submit">Wyślij</button>
+      </form>
+    </dialog>
+    <nav class="mobile-nav" aria-label="Główna nawigacja mobilna">
+      {% for key, href, label in nav_items %}
+      <a href="{{ href }}" data-nav="{{ key }}" {% if key == active %}aria-current="page" class="is-active"{% endif %}>
+        <span aria-hidden="true" class="nav-symbol"></span>{{ label }}
+      </a>
+      {% endfor %}
+    </nav>
+    {% endif %}
+  </body>
+</html>

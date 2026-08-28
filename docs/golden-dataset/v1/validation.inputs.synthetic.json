@@ -1,0 +1,98 @@
+{
+  "schema_version": "golden-v1-synthetic-validation-inputs",
+  "synthetic": true,
+  "labels_included": false,
+  "profile_basis": "career-profile-2026-08-10",
+  "cases": [
+    {
+      "case_id": "syn-val-01",
+      "tags": ["agentic_ai", "regulated_process", "internal"],
+      "offer": {"company": "Synthetic Compliance Flow", "title": "AI Workflow Engineer", "responsibilities": ["Build agents that automate internal regulatory evidence collection", "Develop Python tools, human approvals and evaluation suites", "Monitor production quality"], "requirements": ["Python", "LLM workflow experience", "Testing and guardrails", "Docker preferred"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [17500, 20500], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-02",
+      "tags": ["consulting", "agent_building", "b2b"],
+      "offer": {"company": "Synthetic Agent Consultancy", "title": "Generative AI Consultant", "responsibilities": ["Build production agents for client operations", "Implement Python integrations and RAG", "Facilitate technical workshops"], "requirements": ["Python and SQL", "LLM apps", "Client communication", "Cloud basics"], "conditions": {"contract": "ongoing B2B, 26 paid days, 2-month notice, medical package", "salary_pln_b2b_net": [17000, 20000], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-03",
+      "tags": ["data_science", "ai_dominant", "financial_services"],
+      "offer": {"company": "Synthetic Insurance AI", "title": "Senior Data Scientist — AI Assistants", "responsibilities": ["Build assistants for claims operations", "Evaluate model quality and safety", "Develop Python services with production teams"], "requirements": ["Python", "Model evaluation", "Regulated-domain experience", "SQL"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [16000, 20000], "remote": "two office days per month", "location": "Warsaw"}}
+    },
+    {
+      "case_id": "syn-val-04",
+      "tags": ["applied_ai", "quality_support", "internal_product"],
+      "offer": {"company": "Synthetic Service Automation", "title": "Applied AI Engineer", "responsibilities": ["Build internal service-desk agents", "Create guardrails and offline evaluations", "Integrate enterprise APIs"], "requirements": ["Python", "Prompt engineering", "Evaluation methods", "API delivery"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [18000, 21500], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-05",
+      "tags": ["years_requirement", "rag", "moderate_gap"],
+      "offer": {"company": "Synthetic Legal Knowledge", "title": "AI Engineer", "responsibilities": ["Build a legal knowledge assistant", "Implement retrieval and answer evaluation", "Containerize Python services"], "requirements": ["At least five years in software or AI delivery", "Python", "RAG", "Docker"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [16500, 19500], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-06",
+      "tags": ["forward_deployed_internal", "process_automation", "uop"],
+      "offer": {"company": "Synthetic Enterprise Transformation", "title": "AI Solutions Engineer", "responsibilities": ["Embed with internal operations teams", "Build and deploy custom AI automations", "Measure adoption and business outcomes"], "requirements": ["Python", "Automation projects", "Stakeholder communication", "Cloud familiarity"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [17000, 20000], "remote": "two office days per month"}}
+    },
+    {
+      "case_id": "syn-val-07",
+      "tags": ["strong_fit", "unknown_conditions", "agentic_ai"],
+      "offer": {"company": "Synthetic Decision Agents", "title": "AI Agent Developer", "responsibilities": ["Build stateful decision agents", "Implement Python tools and tests", "Automate manual business workflows"], "requirements": ["Python", "LLM orchestration", "Testing"], "conditions": {"contract": "unknown", "salary": "unknown", "remote": "unknown"}}
+    },
+    {
+      "case_id": "syn-val-08",
+      "tags": ["vague_offer", "candidate_fit_boundary", "unknown"],
+      "offer": {"company": "Synthetic AI Hub", "title": "AI Expert", "responsibilities": ["Participate in innovative AI initiatives", "Support teams in adopting AI"], "requirements": ["Python knowledge", "Interest in AI"], "conditions": {"contract": "UoP full time", "salary": "unknown", "remote": "hybrid"}}
+    },
+    {
+      "case_id": "syn-val-09",
+      "tags": ["retrieval", "mixed_core", "counterfactual"],
+      "offer": {"company": "Synthetic Research Library", "title": "Knowledge AI Engineer", "responsibilities": ["Own ingestion, chunking and metadata quality", "Maintain search indexes", "Develop selected agent retrieval tools"], "requirements": ["Python", "Data pipelines", "Search", "Vector databases"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [17000, 20000], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-10",
+      "tags": ["excellent_fit", "hybrid_frequency_unknown", "condition_gate"],
+      "offer": {"company": "Synthetic Banking Automation", "title": "Generative AI Engineer", "responsibilities": ["Build bank-process agents", "Develop Python integrations", "Evaluate quality and controls"], "requirements": ["Python", "Banking", "Model evaluation", "LLM workflows"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [17000, 20500], "remote": "hybrid, schedule agreed with manager"}}
+    },
+    {
+      "case_id": "syn-val-11",
+      "tags": ["ai_validation", "high_candidate_fit", "direction_boundary"],
+      "offer": {"company": "Synthetic AI Assurance", "title": "Generative AI Validation Expert", "responsibilities": ["Independently validate LLM and agent systems", "Create Python testing frameworks", "Write governance opinions"], "requirements": ["Model validation", "Python", "LLM evaluation", "Regulated environments"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [18000, 22000], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-12",
+      "tags": ["forward_deployed_external", "ambiguous_build_share", "travel_unknown"],
+      "offer": {"company": "Synthetic Deployment Partners", "title": "Customer AI Engineer", "responsibilities": ["Launch AI products in customer environments", "Configure connectors and train users", "Build missing Python extensions"], "requirements": ["Python", "Cloud deployment", "Customer workshops", "LLM basics"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [18000, 22500], "remote": "remote with customer meetings"}}
+    },
+    {
+      "case_id": "syn-val-13",
+      "tags": ["agentic_ai", "deep_platform_gap", "high_direction_low_fit"],
+      "offer": {"company": "Synthetic Agent Platform", "title": "Senior Agent Infrastructure Engineer", "responsibilities": ["Own a multi-tenant agent runtime", "Design distributed tracing and failure recovery", "Operate Kubernetes at scale"], "requirements": ["Seven years backend engineering", "Distributed systems", "Advanced Kubernetes", "Deep agent orchestration"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [23000, 30000], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-14",
+      "tags": ["ai_title_trap", "frontend_backend_core", "third_party_ai"],
+      "offer": {"company": "Synthetic Smart Workspace", "title": "AI Full-Stack Engineer", "responsibilities": ["Build TypeScript user interfaces", "Maintain Java and PostgreSQL services", "Connect a vendor AI search widget"], "requirements": ["Five years full-stack", "TypeScript", "Java", "Kubernetes"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [19000, 24000], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-15",
+      "tags": ["presales", "sales_core", "ai_platform"],
+      "offer": {"company": "Synthetic Model Platform", "title": "AI Solution Engineer", "responsibilities": ["Demonstrate the platform to prospects", "Write RFP responses and sales proposals", "Support account executives"], "requirements": ["AI literacy", "Presentation skills", "Enterprise sales", "Travel availability"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [19000, 25000], "remote": "fully remote between customer visits"}}
+    },
+    {
+      "case_id": "syn-val-16",
+      "tags": ["unstable_contract", "great_substantive_fit", "hard_conflict"],
+      "offer": {"company": "Synthetic Document Pilot", "title": "AI Automation Engineer", "responsibilities": ["Build an invoice-processing agent", "Implement Python APIs and evaluations"], "requirements": ["Python", "LLM applications", "OCR useful"], "conditions": {"contract": "two-month project contract with no renewal, leave or notice", "salary_pln_b2b_net": [19000, 21000], "remote": "fully remote"}}
+    },
+    {
+      "case_id": "syn-val-17",
+      "tags": ["classic_ml", "candidate_fit_high", "direction_conflict"],
+      "offer": {"company": "Synthetic Credit Models", "title": "Senior AI/ML Engineer", "responsibilities": ["Train credit risk models", "Engineer tabular features", "Maintain batch scoring and drift monitoring"], "requirements": ["Python and SQL", "Banking", "Model validation", "Classical machine learning"], "conditions": {"contract": "UoP full time", "salary_pln_gross": [17500, 21500], "remote": "two office days per month"}}
+    },
+    {
+      "case_id": "syn-val-18",
+      "tags": ["llmops", "infrastructure_core", "onsite"],
+      "offer": {"company": "Synthetic Private Cloud", "title": "LLMOps Engineer", "responsibilities": ["Operate GPU inference clusters", "Maintain OpenShift, Kubernetes and model serving", "Tune capacity, latency and availability"], "requirements": ["Kubernetes", "GPU serving", "Terraform", "MLOps", "On-call support"], "conditions": {"contract": "B2B without paid leave", "salary_pln_b2b_net": [18000, 22000], "remote": "three office days per week"}}
+    }
+  ]
+}

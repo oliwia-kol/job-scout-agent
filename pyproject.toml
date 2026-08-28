@@ -1,0 +1,51 @@
+[project]
+name = "ai-job-scout"
+version = "0.1.0"
+description = "Private local-first job monitoring and evaluation system"
+readme = "README.md"
+requires-python = ">=3.11"
+dependencies = [
+    "beautifulsoup4>=4.12",
+    "fastapi>=0.115",
+    "httpx>=0.27",
+    "jinja2>=3.1",
+    "mlflow>=3.0",
+    "openai>=1.60",
+    "playwright>=1.49",
+    "pydantic>=2.10",
+    "pypdf>=5.0",
+    "python-dotenv>=1.0",
+    "python-multipart>=0.0.32",
+    "trafilatura>=2.0",
+    "uvicorn>=0.34",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.3",
+    "pytest-asyncio>=0.25",
+    "respx>=0.22",
+    "ruff>=0.9",
+]
+
+[project.scripts]
+job-scout = "job_scout.cli:run"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/job_scout"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/unit"]
+pythonpath = ["src"]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP"]

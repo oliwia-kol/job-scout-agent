@@ -1,0 +1,36 @@
+{
+  "dataset_id": "offers-language-pairs-v1",
+  "kind": "synthetic-controlled",
+  "license": "CC0-1.0",
+  "created_for": "AI Job Scout language regression tests",
+  "pairs": [
+    {
+      "id": "pl-remote-salary",
+      "source_language": "pl",
+      "source_text": "Praca zdalna z Polski. Wynagrodzenie 18 000–24 000 PLN miesięcznie na B2B. Wymagamy 3 lat doświadczenia w Python i SQL.",
+      "canonical_english": "Remote work from Poland. Compensation of 18,000–24,000 PLN per month on a B2B contract. We require 3 years of experience with Python and SQL.",
+      "must_preserve": ["Poland", "18", "000", "24", "PLN", "B2B", "3", "Python", "SQL"]
+    },
+    {
+      "id": "pl-negation-hybrid",
+      "source_language": "pl",
+      "source_text": "Rola hybrydowa w Warszawie, dwa dni w biurze. Nie wymagamy doświadczenia komercyjnego z Kubernetes.",
+      "canonical_english": "Hybrid role in Warsaw, two days in the office. We do not require commercial experience with Kubernetes.",
+      "must_preserve": ["Warsaw", "not", "Kubernetes"]
+    },
+    {
+      "id": "mixed-ai-stack",
+      "source_language": "mixed",
+      "source_text": "Dołączysz do AI Platform team. Będziesz budować RAG pipelines i evaluation harnesses w Python. No on-call duty is required.",
+      "canonical_english": "You will join the AI Platform team. You will build RAG pipelines and evaluation harnesses in Python. No on-call duty is required.",
+      "must_preserve": ["AI", "RAG", "Python", "No", "on-call"]
+    },
+    {
+      "id": "en-control",
+      "source_language": "en",
+      "source_text": "This is a fully remote Applied AI Engineer role for candidates based in Poland. Travel is not required.",
+      "canonical_english": "This is a fully remote Applied AI Engineer role for candidates based in Poland. Travel is not required.",
+      "must_preserve": ["remote", "Applied AI Engineer", "Poland", "not"]
+    }
+  ]
+}
