@@ -9,6 +9,7 @@ from pydantic import BaseModel, Field
 
 from .ats_scrapers import CleanJob, DiscoveredJob, HttpClient, adapter_for, clean_job
 from .prefilter import PrefilterResult, evaluate_prefilter
+from .role_direction import classify_role
 from .sources import SourceConfig
 from .title_filter import match_title
 
@@ -128,7 +129,7 @@ async def collect_sources(
                 observed_jobs=discovered,
             )
             observations.append(observation)
-            if apply_prefilter:
+            if apply_prefilter and source.adapter != "justjoin":
                 title_matches = []
                 for job in discovered:
                     signals = match_title(job.title)
@@ -168,7 +169,32 @@ async def collect_sources(
                     )
                     continue
                 prefilter = evaluate_prefilter(offer)
-                if apply_prefilter and not prefilter.passed:
+                if source.adapter == "justjoin":
+                    role = classify_role(offer.title, offer.analysis_text)
+                    offer.role_direction = role.category
+                    offer.role_reason = role.reason
+                    if apply_prefilter and role.category == "software":
+                        rejected.append(
+                            RejectedOffer(
+                                source_id=source.id,
+                                company=offer.company,
+                                title=offer.title,
+                                url=str(offer.url),
+                                stage="role",
+                                reasons=[role.reason],
+                            )
+                        )
+                        # Keep the full ad reviewable even though the default offer view hides it.
+                        offers.append(offer)
+                        continue
+                if (
+                    apply_prefilter
+                    and not prefilter.passed
+                    and (
+                        source.adapter != "justjoin"
+                        or prefilter.location_eligibility.value == "ineligible"
+                    )
+                ):
                     rejected.append(
                         RejectedOffer(
                             source_id=source.id,

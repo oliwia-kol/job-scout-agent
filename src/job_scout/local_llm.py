@@ -77,6 +77,7 @@ class LocalLlmClient:
         strict_schema: bool = True,
         instruction_language: Literal["en", "pl"] = "en",
         validate: Callable[[SchemaT], None] | None = None,
+        json_schema_override: dict | None = None,
     ) -> StructuredLlmResponse[SchemaT]:
         schema_json = json.dumps(schema.model_json_schema(), sort_keys=True)
         schema_instruction = (
@@ -105,7 +106,7 @@ class LocalLlmClient:
                     "json_schema": {
                         "name": schema_name,
                         "strict": True,
-                        "schema": schema.model_json_schema(),
+                        "schema": json_schema_override or schema.model_json_schema(),
                     },
                 }
                 if attempt == 0 and strict_schema

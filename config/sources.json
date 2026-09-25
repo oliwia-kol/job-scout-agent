@@ -1,4 +1,5 @@
 [
+  {"id":"justjoin_ai","company":"Just Join IT","adapter":"justjoin","career_url":"https://justjoin.it/job-offers/all-locations/ai","options":{}},
   {"id":"elevenlabs","company":"ElevenLabs","adapter":"ashby","career_url":"https://jobs.ashbyhq.com/elevenlabs","options":{"board_name":"elevenlabs"}},
   {"id":"netflix","company":"Netflix","adapter":"eightfold","career_url":"https://explore.jobs.netflix.net/careers","options":{"domain":"netflix.com"}},
   {"id":"revolut","company":"Revolut","adapter":"browser","career_url":"https://www.revolut.com/en-PL/careers/","options":{"wait_ms":6000,"headless":false}},

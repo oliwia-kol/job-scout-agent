@@ -1,8 +1,0 @@
-{
-  "dependencies": ["."],
-  "graphs": {
-    "AI-Job-Scout": "./main.py:app"
-  },
-  "env": ".env",
-  "python_version": "3.11"
-}

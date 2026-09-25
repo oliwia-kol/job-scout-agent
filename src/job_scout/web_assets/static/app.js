@@ -32,41 +32,6 @@
     });
   });
 
-  const runtimeLabels = {
-    idle: ["Bielik czeka na uruchomienie", "Aplikacja ładuje go w tle albo przy pierwszej wiadomości."],
-    starting: ["Bielik uruchamia się", "Pierwsze załadowanie modelu może potrwać około minuty."],
-    ready: ["Bielik jest gotowy", "Model działa lokalnie i jest połączony z aplikacją."],
-    error: ["Nie udało się uruchomić Bielika", "Sprawdź data/logs/bielik.log."],
-    unavailable: ["Brak modelu Bielik", "Nie znaleziono lokalnego pliku GGUF."],
-  };
-
-  document.querySelectorAll("[data-career-runtime]").forEach(async (panel) => {
-    try {
-      const response = await fetch("/runtime/career/status", {
-        headers: { Accept: "application/json" },
-      });
-      if (!response.ok) return;
-      const runtime = await response.json();
-      const state = runtime.state || "idle";
-      const [label, fallbackDetail] = runtimeLabels[state] || runtimeLabels.idle;
-      const stateNode = panel.querySelector("[data-runtime-state]");
-      const detailNode = panel.querySelector("[data-runtime-detail]");
-      if (stateNode) {
-        stateNode.textContent = label;
-        stateNode.dataset.state = state;
-        stateNode.className =
-          state === "ready"
-            ? "runtime-good"
-            : state === "error" || state === "unavailable"
-              ? "source-error"
-              : "runtime-warn";
-      }
-      if (detailNode) detailNode.textContent = runtime.detail || fallbackDetail;
-    } catch {
-      // The server-rendered state remains a useful, accessible fallback.
-    }
-  });
-
   document.querySelectorAll(".guide-transcript").forEach((transcript) => {
     transcript.scrollTop = transcript.scrollHeight;
   });
@@ -130,56 +95,4 @@
     }
   });
 
-  const bielikDialog = document.querySelector("[data-bielik-dialog]");
-  const transcript = document.querySelector("[data-bielik-transcript]");
-  const bielikState = document.querySelector("[data-bielik-state]");
-  let bielikTimer;
-  const sessionKey = "ai-job-scout-bielik-session";
-  const renderMessages = (messages) => {
-    if (!transcript) return;
-    transcript.replaceChildren(...messages.map((message) => {
-      const article = document.createElement("article"); article.className = `bielik-message bielik-message--${message.role}`;
-      article.textContent = message.content;
-      if (message.role === "user" && message.metadata?.delivery_status) {
-        const status = document.createElement("small"); status.className = "bielik-delivery";
-        status.textContent = ({ sent: "wysłano", generating: "Bielik generuje…", answered: "odpowiedziano", failed: "błąd — spróbuj ponownie" })[message.metadata.delivery_status] || "wysłano";
-        article.append(status);
-        if (message.metadata.delivery_status === "failed") {
-          const retry = document.createElement("button"); retry.type = "button"; retry.className = "bielik-retry"; retry.textContent = "Ponów";
-          retry.addEventListener("click", async () => {
-            await fetch(`/api/bielik/messages/${encodeURIComponent(message.message_id)}/retry`, { method: "POST" });
-            if (bielikState) bielikState.textContent = "Ponawiam odpowiedź Bielika…";
-            await loadBielik();
-          }); article.append(retry);
-        }
-      }
-      return article;
-    })); transcript.scrollTop = transcript.scrollHeight;
-  };
-  const loadBielik = async () => {
-    let id = sessionStorage.getItem(sessionKey);
-    let response = id ? await fetch(`/api/bielik/sessions/${encodeURIComponent(id)}`) : null;
-    if (!response || !response.ok) response = await fetch("/api/bielik/sessions/current");
-    if (!response.ok) return null;
-    const session = await response.json(); sessionStorage.setItem(sessionKey, session.session.session_id); renderMessages(session.messages); return session;
-  };
-  document.querySelectorAll("[data-bielik-open]").forEach((button) => button.addEventListener("click", async () => {
-    bielikDialog?.showModal(); try { await loadBielik(); } catch (_) { if (bielikState) bielikState.textContent = "Nie udało się odczytać rozmowy."; }
-  }));
-  document.querySelectorAll("[data-bielik-close]").forEach((button) => button.addEventListener("click", () => bielikDialog?.close()));
-  document.querySelectorAll("[data-bielik-form]").forEach((form) => form.addEventListener("submit", async (event) => {
-    event.preventDefault(); const input = document.querySelector("[data-bielik-input]"); const content = input?.value.trim(); if (!content) return;
-    input.value = ""; if (bielikState) bielikState.textContent = "Wysłano — Bielik uruchamia się i generuje odpowiedź…";
-    try {
-      const response = await fetch("/api/bielik/messages", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ session_id: sessionStorage.getItem(sessionKey), content }) });
-      if (!response.ok) throw new Error(); await loadBielik();
-      window.clearInterval(bielikTimer); bielikTimer = window.setInterval(async () => {
-        const result = await loadBielik(); const last = result?.messages?.at(-1);
-        if (last?.role === "assistant" || last?.metadata?.delivery_status === "failed") {
-          window.clearInterval(bielikTimer);
-          if (bielikState) bielikState.textContent = last?.role === "assistant" ? "Bielik odpowiedział." : "Bielik nie odpowiedział — możesz ponowić.";
-        }
-      }, 1200);
-    } catch (_) { if (bielikState) bielikState.textContent = "Wiadomość nie została wysłana. Spróbuj ponownie."; }
-  }));
 })();

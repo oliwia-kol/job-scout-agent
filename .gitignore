@@ -1,53 +1,23 @@
-# Python and local tooling
+# Local environment and secrets
+.env
+.env.*
+!.env.example
 .venv/
 venv/
 __pycache__/
 *.py[cod]
-*.egg-info/
 .pytest_cache/
 .ruff_cache/
-.langgraph_api/
-.DS_Store
-
-# Secrets and local runtime state
-.env
-!.env.example
-/data/**
-!/data/filtered-test-offers.json
-!/data/demo/
-/data/demo/**
-!/data/demo/extractor-benchmark-qwen-v3.json
+*.egg-info/
 models/
-mlruns/
 *.gguf
-uvicorn.log
-scrub_report.json
-scrapers_config.json
-
-# Personal CVs, exports, screenshots and raw research captures
-/cv_basde/
-/cv_*.html
+/data/
+/docs/
+/config/profile/
+/ops/
+/prompts/
 /output/
 /tmp/
-/revolut_test.html
-/jina_velo.md
-/moje_cv.md
-/style.md
-
-# Machine-specific launchd configuration and local agent metadata
-/ops/
-/.agents/
-/.codex/
-
-# Internal notes and profile history are private. Only the synthetic Golden v1
-# benchmark contract is public.
-/docs/**
-!/docs/golden-dataset/
-!/docs/golden-dataset/v1/
-!/docs/golden-dataset/v1/README.md
-!/docs/golden-dataset/v1/MODEL_EVALUATION_INSTRUCTION.md
-!/docs/golden-dataset/v1/PROFILE_CONTEXT.json
-!/docs/golden-dataset/v1/*.synthetic.json
-
-# The role-direction calibration and real candidate profile stay local.
-/config/profile/
+mlruns/
+*.log
+.DS_Store

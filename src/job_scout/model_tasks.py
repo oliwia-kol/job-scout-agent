@@ -189,6 +189,7 @@ def evaluation_evidence_sources(offer: CleanJob, profile: CandidateProfile) -> d
     )
     sources = {
         "offer.analysis_text": offer.analysis_text,
+        "offer.description": offer.description,
         "offer.work_conditions": " ".join(item.evidence for item in work_conditions),
     }
     sources.update({f"profile:{item.id}": item.statement for item in profile.evidence})

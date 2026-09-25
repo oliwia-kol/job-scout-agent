@@ -128,9 +128,7 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
         if current_version == 0:
             tables = {
                 row["name"]
-                for row in connection.execute(
-                    "SELECT name FROM sqlite_master WHERE type = 'table'"
-                )
+                for row in connection.execute("SELECT name FROM sqlite_master WHERE type = 'table'")
             }
             if tables - {"schema_version"}:
                 _migrate_legacy_database(connection, migrations_dir)
@@ -156,12 +154,11 @@ def apply_migrations(connection: sqlite3.Connection) -> None:
             (15, "015_add_profile_facts.sql"),
             (16, "016_add_offer_section_evidence.sql"),
             (17, "017_add_cv_tailoring.sql"),
+            (18, "018_add_evaluation_feedback.sql"),
         ]:
             if current_version < version:
                 _execute_sql_file(connection, migrations_dir / filename)
-                connection.execute(
-                    "INSERT INTO schema_version (version) VALUES (?)", (version,)
-                )
+                connection.execute("INSERT INTO schema_version (version) VALUES (?)", (version,))
                 current_version = version
 
 
@@ -478,9 +475,7 @@ def _insert_offer_event(
     created_at: str,
 ) -> None:
     serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
-    event_id = sha256(
-        f"{offer_id}:{event_type}:{created_at}:{serialized}".encode()
-    ).hexdigest()
+    event_id = sha256(f"{offer_id}:{event_type}:{created_at}:{serialized}".encode()).hexdigest()
     connection.execute(
         """
         INSERT OR IGNORE INTO offer_events (
@@ -825,9 +820,7 @@ def queue_notification_delivery(
             "body": notification["body"],
             "link": notification["private_link"],
         }
-        delivery_id = sha256(
-            f"{notification_id}:{channel}:{destination_key}".encode()
-        ).hexdigest()
+        delivery_id = sha256(f"{notification_id}:{channel}:{destination_key}".encode()).hexdigest()
         connection.execute(
             """
             INSERT OR IGNORE INTO notification_deliveries (
@@ -1107,7 +1100,11 @@ def persist_monitored_collection(
 
 
 def save_collection_rejections(
-    path: Path, run_id: str, rejected: Iterable[object], *, discovered_count: int = 0,
+    path: Path,
+    run_id: str,
+    rejected: Iterable[object],
+    *,
+    discovered_count: int = 0,
     processing_error_count: int = 0,
 ) -> None:
     """Persist a compact audit trail after a monitored scan has completed."""
@@ -1122,8 +1119,13 @@ def save_collection_rejections(
                 (run_id, source_id, company, title, url, stage, reasons_json)
                 VALUES (?, ?, ?, ?, ?, ?, ?)""",
                 (
-                    run_id, item.source_id, item.company, item.title, item.url,
-                    item.stage, json.dumps(item.reasons, ensure_ascii=False),
+                    run_id,
+                    item.source_id,
+                    item.company,
+                    item.title,
+                    item.url,
+                    item.stage,
+                    json.dumps(item.reasons, ensure_ascii=False),
                 ),
             )
         connection.execute(
@@ -1158,15 +1160,20 @@ def get_collection_run(path: Path, run_id: str) -> dict | None:
         **dict(run),
         "sources": [dict(item) for item in sources],
         "rejections": [
-            {**dict(item), "reasons": json.loads(item["reasons_json"])}
-            for item in rejections
+            {**dict(item), "reasons": json.loads(item["reasons_json"])} for item in rejections
         ],
     }
 
 
 def persist_cancelled_collection(
-    path: Path, *, run_id: str, mode: str, started_at: str, sources_total: int,
-    sources_checked: int, current_source: str | None,
+    path: Path,
+    *,
+    run_id: str,
+    mode: str,
+    started_at: str,
+    sources_total: int,
+    sources_checked: int,
+    current_source: str | None,
 ) -> None:
     """Keep a cancelled scan auditable without applying a partial offer snapshot."""
     initialize_database(path)
@@ -1177,8 +1184,13 @@ def persist_cancelled_collection(
             offers_saved, new_raw_versions, offers_marked_unavailable, error
             ) VALUES (?, ?, ?, ?, 'cancelled', ?, ?, 0, 0, 0, ?)""",
             (
-                run_id, mode, started_at, datetime.now(UTC).isoformat(), sources_total,
-                sources_checked, f"cancelled while checking {current_source or 'sources'}",
+                run_id,
+                mode,
+                started_at,
+                datetime.now(UTC).isoformat(),
+                sources_total,
+                sources_checked,
+                f"cancelled while checking {current_source or 'sources'}",
             ),
         )
 
@@ -1210,6 +1222,8 @@ def list_offers(
     company: str = "",
     status: str = "",
     availability: str = "",
+    feedback: str = "",
+    role_visibility: str = "all",
 ) -> list[dict]:
     initialize_database(path)
     clauses: list[str] = []
@@ -1227,6 +1241,13 @@ def list_offers(
     if availability:
         clauses.append("availability_status = ?")
         params.append(availability)
+    if feedback == "false_negative":
+        clauses.append(
+            "EXISTS (SELECT 1 FROM evaluation_feedback AS ef "
+            "WHERE ef.offer_id = o.id "
+            "AND ef.evaluation_input_sha256 = o.evaluation_input_sha256 "
+            "AND ef.feedback_type = 'false_negative')"
+        )
     where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     with connect(path) as connection:
         rows = connection.execute(
@@ -1238,6 +1259,12 @@ def list_offers(
                    o.language_confidence, o.language_detected_at,
                    o.current_content_sha256, o.evaluation_input_sha256,
                    o.needs_evaluation, o.assessment_json,
+                   EXISTS (
+                       SELECT 1 FROM evaluation_feedback AS ef
+                       WHERE ef.offer_id = o.id
+                         AND ef.evaluation_input_sha256 = o.evaluation_input_sha256
+                         AND ef.offer_content_sha256 = o.current_content_sha256
+                   ) AS has_false_negative_feedback,
                    (
                        SELECT pr.profile_id
                        FROM evaluation_run_items AS eri
@@ -1252,16 +1279,19 @@ def list_offers(
             """,
             params,
         ).fetchall()
-    return [
+    offers = [
         {
             **dict(row),
             "offer": json.loads(row["offer_json"]),
-            "assessment": (
-                json.loads(row["assessment_json"]) if row["assessment_json"] else None
-            ),
+            "assessment": (json.loads(row["assessment_json"]) if row["assessment_json"] else None),
         }
         for row in rows
     ]
+    if role_visibility == "visible":
+        return [item for item in offers if item["offer"].get("role_direction") != "software"]
+    if role_visibility == "hidden":
+        return [item for item in offers if item["offer"].get("role_direction") == "software"]
+    return offers
 
 
 def get_offer(path: Path, offer_id: int) -> dict | None:
@@ -1346,6 +1376,78 @@ def update_application_status(path: Path, offer_id: int, status: str) -> bool:
     with connect(path) as connection:
         cursor = connection.execute(
             "UPDATE offers SET application_status = ? WHERE id = ?", (status, offer_id)
+        )
+    return cursor.rowcount == 1
+
+
+def get_current_evaluation_feedback(path: Path, offer_id: int) -> dict | None:
+    initialize_database(path)
+    with connect(path) as connection:
+        row = connection.execute(
+            """SELECT ef.* FROM evaluation_feedback AS ef
+            JOIN offers AS o ON o.id = ef.offer_id
+            WHERE ef.offer_id = ?
+              AND ef.evaluation_input_sha256 = o.evaluation_input_sha256
+              AND ef.offer_content_sha256 = o.current_content_sha256""",
+            (offer_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def set_false_negative_feedback(
+    path: Path, offer_id: int, evaluation_input_sha256: str, note: str
+) -> bool:
+    """Attach a user correction to the exact current negative model evaluation."""
+    initialize_database(path)
+    if len(note) > 1000:
+        raise ValueError("feedback note is too long")
+    now = datetime.now(UTC).isoformat()
+    with connect(path) as connection:
+        row = connection.execute(
+            """SELECT current_content_sha256, evaluation_input_sha256,
+                      needs_evaluation, assessment_json
+               FROM offers WHERE id = ?""",
+            (offer_id,),
+        ).fetchone()
+        if (
+            not row
+            or not evaluation_input_sha256
+            or row["evaluation_input_sha256"] != evaluation_input_sha256
+            or row["needs_evaluation"]
+            or not row["assessment_json"]
+        ):
+            return False
+        assessment = json.loads(row["assessment_json"])
+        recommendation = str(assessment.get("recommendation") or "")
+        if recommendation not in {"low_priority", "prepare_first"}:
+            return False
+        connection.execute(
+            """INSERT INTO evaluation_feedback (
+                offer_id, evaluation_input_sha256, offer_content_sha256,
+                feedback_type, note, model_recommendation, created_at, updated_at
+            ) VALUES (?, ?, ?, 'false_negative', ?, ?, ?, ?)
+            ON CONFLICT(offer_id, evaluation_input_sha256)
+            DO UPDATE SET note = excluded.note, updated_at = excluded.updated_at""",
+            (
+                offer_id,
+                evaluation_input_sha256,
+                row["current_content_sha256"],
+                note.strip(),
+                recommendation,
+                now,
+                now,
+            ),
+        )
+    return True
+
+
+def clear_false_negative_feedback(path: Path, offer_id: int, evaluation_input_sha256: str) -> bool:
+    initialize_database(path)
+    with connect(path) as connection:
+        cursor = connection.execute(
+            """DELETE FROM evaluation_feedback
+            WHERE offer_id = ? AND evaluation_input_sha256 = ?""",
+            (offer_id, evaluation_input_sha256),
         )
     return cursor.rowcount == 1
 
@@ -1573,9 +1675,7 @@ def approve_profile_document(
         serialized = json.dumps(payload, ensure_ascii=False, sort_keys=True)
         version_status = "approved" if has_scoring_profile else "cv_approved"
         profile_status = "ready" if has_scoring_profile else "cv_approved"
-        completeness_status = (
-            "ready_for_scoring" if has_scoring_profile else "cv_approved"
-        )
+        completeness_status = "ready_for_scoring" if has_scoring_profile else "cv_approved"
         connection.execute(
             """
             UPDATE profile_documents
@@ -1875,9 +1975,10 @@ def profile_readiness(path: Path, profile_id: str) -> dict:
 
 def is_profile_ready_for_scoring(path: Path, profile_id: str) -> bool:
     """Use this guard at every scoring or offer-advice entry point."""
-    return bool(get_user_profile(path, profile_id)) and profile_readiness(path, profile_id)[
-        "ready_for_scoring"
-    ]
+    return (
+        bool(get_user_profile(path, profile_id))
+        and profile_readiness(path, profile_id)["ready_for_scoring"]
+    )
 
 
 def _store_profile_fact_snapshot(connection: sqlite3.Connection, profile_id: str) -> int:
@@ -2248,9 +2349,10 @@ def retry_failed_evaluation_run(path: Path, source_run_id: str) -> str:
         raise ValueError("source evaluation run has no profile snapshot")
     profile = CandidateProfile.model_validate(profile_data)
     started_at = datetime.now(UTC)
-    run_id = "demo-retry-" + sha256(
-        f"{source_run_id}:{started_at.isoformat()}".encode()
-    ).hexdigest()[:16]
+    run_id = (
+        "demo-retry-"
+        + sha256(f"{source_run_id}:{started_at.isoformat()}".encode()).hexdigest()[:16]
+    )
     items = [
         EvaluationRunItem(
             item_id=f"{run_id}:{item['offer_id']}",
@@ -2312,14 +2414,24 @@ def update_evaluation_run_item(
                 """
                 UPDATE offers
                 SET assessment_json = ?, judge_json = ?,
-                    evaluation_input_sha256 = current_content_sha256,
+                    evaluation_input_sha256 = ?,
                     needs_evaluation = 0
-                WHERE id = ?
+                WHERE id = ? AND (? IS NULL OR current_content_sha256 = ?)
+                  AND (? IS NULL OR EXISTS (
+                    SELECT 1 FROM user_profiles
+                    WHERE profile_id = ? AND current_version = ?
+                  ))
                 """,
                 (
                     item.final_assessment.model_dump_json(),
                     item.judgment.model_dump_json() if item.judgment else None,
+                    item.input_sha256,
                     item.offer_id,
+                    item.input_snapshot.get("content_sha256"),
+                    item.input_snapshot.get("content_sha256"),
+                    item.input_snapshot.get("profile_id"),
+                    item.input_snapshot.get("profile_id"),
+                    item.input_snapshot.get("profile_version"),
                 ),
             )
         if is_completed:

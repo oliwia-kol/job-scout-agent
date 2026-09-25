@@ -11,66 +11,22 @@ import re
 import shutil
 import uuid
 from collections.abc import Awaitable, Callable
-from contextlib import asynccontextmanager, suppress
+from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from html import escape
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import FastAPI, File, Form, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
-from .app_guide import (
-    AppGuideResponder,
-    BielikAppGuideResponder,
-    add_app_guide_message,
-    build_app_guide_context,
-    get_app_guide,
-    get_app_guide_message,
-    get_or_create_app_guide,
-    persist_app_guide_turn,
-    update_app_guide_message_metadata,
-)
-from .asr import (
-    AsrProvider,
-    approve_transcript,
-    list_transcripts,
-    save_transcript_draft,
-    store_audio_draft,
-)
-from .career import (
-    BielikInterviewResponder,
-    InterviewResponder,
-    add_message,
-    approve_knowledge_base_version,
-    build_interview_context,
-    create_knowledge_base_version,
-    get_active_interview,
-    get_latest_knowledge_base,
-    persist_interview_turn,
-    review_knowledge_entry,
-    start_interview,
-)
+from .career import get_latest_knowledge_base
 from .collector import collect_sources
 from .cv_tailoring import (
     CvTailoringError,
-    CvTailoringResponder,
-    QwenCvTailoringResponder,
-    approve_master_mapping,
-    build_application_package,
-    build_tailoring_context,
-    compose_tailored_html,
-    get_active_master_cv,
     get_application_package,
-    get_cv_document,
-    get_tailoring_session,
-    import_master_cv,
-    persist_suggestion_batch,
-    prepare_print_html,
     record_package_event,
-    review_suggestion,
-    start_tailoring_session,
 )
 from .domain import (
     ApplicationStatus,
@@ -80,27 +36,21 @@ from .domain import (
     EvaluationRunStatus,
     PipelineRun,
 )
-from .llama_server import LlamaServerError, LlamaServerManager, OnDemandLlamaRuntime
-from .local_llm import LocalLlmClient, LocalLlmError
-from .offer_copilot import (
-    BielikOfferCopilotResponder,
-    OfferCopilotResponder,
-    add_offer_chat_message,
-    build_offer_chat_context,
-    get_offer_chat,
-    persist_offer_copilot_turn,
-    start_offer_chat,
-)
 from .profiles import CvExtractionError, extract_cv_pdf, file_sha256, safe_filename, store_cv_bytes
+from .requirement_matrix import MATRIX_VERSION
+from .role_direction import ROLE_RULES_VERSION
+from .role_fit import PROMPT_VERSION as ROLE_FIT_PROMPT_VERSION
 from .settings import Settings
 from .sources import load_sources
 from .storage import (
     approve_profile_document,
     cancel_run,
+    clear_false_negative_feedback,
     connect,
     create_evaluation_run,
     get_collection_monitoring,
     get_collection_run,
+    get_current_evaluation_feedback,
     get_latest_evaluation_run,
     get_latest_offer_translation,
     get_offer,
@@ -134,6 +84,7 @@ from .storage import (
     save_profile_document,
     save_profile_fact,
     save_user_profile,
+    set_false_negative_feedback,
     update_application_status,
     update_run_state,
 )
@@ -142,9 +93,9 @@ from .web_ui import STATIC_ROOT, layout
 STATUS_LABELS = {
     "new": "Nowa",
     "saved": "Zapisana",
-    "rejected": "Odrzucona",
+    "rejected": "Odrzucona przeze mnie",
     "applying": "Aplikuję",
-    "applied": "Aplikowano",
+    "applied": "CV wysłane",
     "review_later": "Na później",
 }
 
@@ -166,18 +117,6 @@ def _profile_fact_value(value: object) -> str:
     return json.dumps(value, ensure_ascii=False)
 
 
-def _cv_asset_label(category: str) -> str:
-    return {
-        "certification": "Certyfikat",
-        "project": "Projekt",
-        "skill": "Skill",
-        "achievement": "Osiągnięcie",
-        "experience_bullet": "Bullet CV",
-        "profile_summary_variant": "Wariant profilu",
-        "keyword": "Keyword",
-    }.get(category, category)
-
-
 CV_ASSET_CATEGORIES = {
     "certification",
     "project",
@@ -192,69 +131,6 @@ CV_ASSET_CATEGORIES = {
 def _split_comma_items(value: str) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
-
-def _cv_assets_panel(profile_id: str, readiness: dict, *, compact: bool = False) -> str:
-    cv_asset_facts = [
-        item for item in readiness["approved_facts"]
-        if item["usable_for_cv"] and item["category"] in CV_ASSET_CATEGORIES
-    ]
-    cv_asset_drafts = [
-        item for item in readiness["draft_facts"]
-        if item["usable_for_cv"] and item["category"] in CV_ASSET_CATEGORIES
-    ]
-    cv_asset_rows = "".join(
-        f"<li><strong>{escape(_cv_asset_label(item['category']))}</strong>: "
-        f"{escape(_profile_fact_value(item['value']))}</li>"
-        for item in cv_asset_facts
-    ) or "<li>Brak zatwierdzonych materiałów CV poza masterem.</li>"
-    cv_asset_draft_rows = "".join(
-        f"""<article class="card"><strong>{escape(_cv_asset_label(item['category']))}</strong>
-        <p>{escape(_profile_fact_value(item['value']))}</p>
-        <p class="muted">Źródło: {escape(item['source_quote'])}</p>
-        <form method="post" action="/profiles/{escape(profile_id)}/facts/{escape(item['fact_id'])}/review">
-          <button name="decision" value="approve" type="submit">Dodaj do puli CV</button>
-          <button class="button--quiet" name="decision" value="reject" type="submit">Odrzuć</button>
-        </form></article>"""
-        for item in cv_asset_drafts
-    ) or "<p class='muted'>Nie ma materiałów CV czekających na zatwierdzenie.</p>"
-    extra_forms = "" if compact else f"""
-      <div class="form-grid">
-        <form class="form-card form-grid" method="post" action="/profiles/{escape(profile_id)}/cv-assets/certifications">
-          <h3 class="wide">Nowy certyfikat</h3>
-          <label class="field">Nazwa<input name="name" required placeholder="np. AI Agents & Agentic AI"></label>
-          <label class="field">Organizacja<input name="issuer" placeholder="np. Vanderbilt University"></label>
-          <label class="field wide">Notatka do decyzji modelu<textarea name="note" placeholder="Kiedy warto pokazywać ten certyfikat w CV?"></textarea></label>
-          <div class="wide"><button type="submit">Dodaj jako draft</button></div>
-        </form>
-        <form class="form-card form-grid" method="post" action="/profiles/{escape(profile_id)}/cv-assets/projects">
-          <h3 class="wide">Projekt opisany pod CV</h3>
-          <label class="field">Nazwa projektu<input name="title" required placeholder="np. AI Job Scout"></label>
-          <label class="field wide">Opis do CV<textarea name="cv_description" required placeholder="Jedno lub dwa zdania w stylu CV, po angielsku."></textarea></label>
-          <label class="field">Technologie<input name="technologies" placeholder="Python, FastAPI, SQLite, local LLM"></label>
-          <label class="field">Wpływ / rezultat<input name="impact" placeholder="np. przygotowuje lokalny pakiet aplikacyjny"></label>
-          <div class="wide"><button type="submit">Dodaj jako draft</button></div>
-        </form>
-        <form class="form-card form-grid" method="post" action="/profiles/{escape(profile_id)}/cv-assets/simple">
-          <h3 class="wide">Skill, osiągnięcie albo bullet</h3>
-          <label class="field">Typ<select name="category">
-            <option value="skill">Skill</option>
-            <option value="achievement">Osiągnięcie</option>
-            <option value="experience_bullet">Bullet CV</option>
-            <option value="profile_summary_variant">Wariant profilu</option>
-            <option value="keyword">Keyword ATS</option>
-          </select></label>
-          <label class="field wide">Treść<textarea name="text" required placeholder="Zapisz gotową treść lub surową notatkę."></textarea></label>
-          <label class="field">Tagi<input name="tags" placeholder="agentic AI, RAG, validation"></label>
-          <div class="wide"><button type="submit">Dodaj jako draft</button></div>
-        </form>
-      </div>"""
-    return f"""<section class="form-card"><div class="company">Materiały do CV</div>
-      <h2>Pula elementów, z których później składamy wersję pod ofertę</h2>
-      <p class="muted">Tu dodajesz treści używane w CV. Nie wpływają automatycznie na scoring ofert,
-      dopóki osobno nie zapiszesz ich jako faktów scoringowych.</p>
-      <h3>Zatwierdzona pula CV</h3><ul>{cv_asset_rows}</ul>
-      {extra_forms}
-      <h3>Do zatwierdzenia</h3>{cv_asset_draft_rows}</section>"""
 
 RUN_MODE_LABELS = {
     "single_offer_eval": "Test 1 oferty",
@@ -336,10 +212,21 @@ class ScanController:
             return None
         run_id = f"scan-{uuid.uuid4().hex[:16]}"
         self.snapshot = {
-            "run_id": run_id, "mode": mode, "status": "running", "current_source": None,
-            "sources_checked": 0, "sources_total": 0, "discovered": 0,
-            "rejected_title": 0, "rejected_location": 0, "errors": 0,
-            "accepted": 0, "new": 0, "updated": 0, "unchanged": 0, "unavailable": 0,
+            "run_id": run_id,
+            "mode": mode,
+            "status": "running",
+            "current_source": None,
+            "sources_checked": 0,
+            "sources_total": 0,
+            "discovered": 0,
+            "rejected_title": 0,
+            "rejected_location": 0,
+            "errors": 0,
+            "accepted": 0,
+            "new": 0,
+            "updated": 0,
+            "unchanged": 0,
+            "unavailable": 0,
             "started_at": datetime.now(UTC).isoformat(),
         }
         self.task = asyncio.create_task(self._run(run_id, mode))
@@ -354,7 +241,11 @@ class ScanController:
     async def _run(self, run_id: str, mode: str) -> None:
         assert self.snapshot is not None
         try:
-            sources = [source for source in load_sources(self.project_root / "config/sources.json") if source.enabled]
+            sources = [
+                source
+                for source in load_sources(self.project_root / "config/sources.json")
+                if source.enabled
+            ]
             if mode == "quick":
                 # The quick scan is deliberately broad but shallow: it samples each source.
                 limit, max_candidates = 1, 4
@@ -369,7 +260,9 @@ class ScanController:
                 )
 
             result = await collect_sources(
-                sources, limit_per_source=limit, max_candidates_per_source=max_candidates,
+                sources,
+                limit_per_source=limit,
+                max_candidates_per_source=max_candidates,
                 progress_callback=update_scan_progress,
             )
             self.snapshot.update(
@@ -378,39 +271,67 @@ class ScanController:
                 discovered=sum(item.discovered_count for item in result.observations),
                 rejected_title=sum(item.stage == "title" for item in result.rejected),
                 rejected_location=sum(item.stage == "location" for item in result.rejected),
-                errors=len(result.errors), accepted=len(result.offers),
+                errors=len(result.errors),
+                accepted=len(result.offers),
             )
-            before = {item["id"]: item["current_content_sha256"] for item in list_offers(self.database_path, availability="")}
+            before = {
+                item["id"]: item["current_content_sha256"]
+                for item in list_offers(self.database_path, availability="")
+            }
             persisted = persist_monitored_collection(
-                self.database_path, run_id=run_id, mode=mode, offers=result.offers,
+                self.database_path,
+                run_id=run_id,
+                mode=mode,
+                offers=result.offers,
                 source_urls={source.id: str(source.career_url) for source in sources},
                 observations=result.observations,
                 started_at=datetime.fromisoformat(self.snapshot["started_at"]),
             )
             save_collection_rejections(
-                self.database_path, run_id, result.rejected,
-                discovered_count=self.snapshot["discovered"], processing_error_count=len(result.errors),
+                self.database_path,
+                run_id,
+                result.rejected,
+                discovered_count=self.snapshot["discovered"],
+                processing_error_count=len(result.errors),
             )
             after = list_offers(self.database_path, availability="")
             self.snapshot.update(
-                status=persisted["status"], current_source=None,
+                status=persisted["status"],
+                current_source=None,
                 unavailable=persisted["offers_marked_unavailable"],
                 new=sum(item["id"] not in before for item in after),
-                updated=sum(item["id"] in before and before[item["id"]] != item["current_content_sha256"] for item in after),
-                unchanged=sum(item["id"] in before and before[item["id"]] == item["current_content_sha256"] for item in after),
+                updated=sum(
+                    item["id"] in before and before[item["id"]] != item["current_content_sha256"]
+                    for item in after
+                ),
+                unchanged=sum(
+                    item["id"] in before and before[item["id"]] == item["current_content_sha256"]
+                    for item in after
+                ),
                 finished_at=datetime.now(UTC).isoformat(),
             )
         except asyncio.CancelledError:
             current_source = self.snapshot.get("current_source")
-            self.snapshot.update(status="cancelled", current_source=None, finished_at=datetime.now(UTC).isoformat())
+            self.snapshot.update(
+                status="cancelled", current_source=None, finished_at=datetime.now(UTC).isoformat()
+            )
             persist_cancelled_collection(
-                self.database_path, run_id=run_id, mode=mode,
-                started_at=self.snapshot["started_at"], sources_total=self.snapshot["sources_total"],
-                sources_checked=self.snapshot["sources_checked"], current_source=current_source,
+                self.database_path,
+                run_id=run_id,
+                mode=mode,
+                started_at=self.snapshot["started_at"],
+                sources_total=self.snapshot["sources_total"],
+                sources_checked=self.snapshot["sources_checked"],
+                current_source=current_source,
             )
             raise
         except Exception as exc:
-            self.snapshot.update(status="failed", current_source=None, error=f"{type(exc).__name__}: {exc}", finished_at=datetime.now(UTC).isoformat())
+            self.snapshot.update(
+                status="failed",
+                current_source=None,
+                error=f"{type(exc).__name__}: {exc}",
+                finished_at=datetime.now(UTC).isoformat(),
+            )
 
 
 def create_app(
@@ -419,75 +340,14 @@ def create_app(
     project_root: Path | None = None,
     demo_runner: DemoRunner | None = None,
     demo_run_preparer: DemoRunPreparer | None = None,
-    interview_responder: InterviewResponder | None = None,
-    offer_copilot_responder: OfferCopilotResponder | None = None,
-    cv_tailoring_responder: CvTailoringResponder | None = None,
-    app_guide_responder: AppGuideResponder | None = None,
-    asr_provider: AsrProvider | None = None,
-    career_runtime: OnDemandLlamaRuntime | None = None,
-    tailoring_runtime: OnDemandLlamaRuntime | None = None,
 ) -> FastAPI:
     mark_interrupted_runs(database_path)
 
     root = project_root or Path.cwd()
-    runtime_settings = Settings.from_env()
-    runtime_owned_by_app = career_runtime is None
-    if career_runtime is None:
-        model_path = runtime_settings.career_llm_model_path
-        if not model_path.is_absolute():
-            model_path = root / model_path
-        career_runtime = OnDemandLlamaRuntime(
-            LlamaServerManager(
-                executable=runtime_settings.llama_server_executable,
-                model_path=model_path,
-                base_url=runtime_settings.career_llm_base_url,
-                context_size=runtime_settings.career_llm_context_size,
-                reasoning=False,
-                speculative_type=runtime_settings.career_llm_speculative_type,
-                startup_timeout_seconds=(
-                    runtime_settings.career_llm_startup_timeout_seconds
-                ),
-                log_path=root / "data/logs/bielik.log",
-            )
-        )
-    tailoring_runtime_owned_by_app = tailoring_runtime is None
-    if tailoring_runtime is None:
-        tailoring_model_path = runtime_settings.local_llm_model_path
-        if not tailoring_model_path.is_absolute():
-            tailoring_model_path = root / tailoring_model_path
-        tailoring_runtime = OnDemandLlamaRuntime(
-            LlamaServerManager(
-                executable=runtime_settings.llama_server_executable,
-                model_path=tailoring_model_path,
-                base_url=runtime_settings.local_llm_base_url,
-                context_size=max(runtime_settings.local_llm_context_size, 8192),
-                reasoning=False,
-                startup_timeout_seconds=120,
-                log_path=root / "data/logs/cv-tailoring-qwen.log",
-            )
-        )
 
     @asynccontextmanager
     async def lifespan(_app: FastAPI):
-        warmup_task: asyncio.Task | None = None
-        if runtime_owned_by_app and runtime_settings.career_llm_autostart:
-            async def warm_up_bielik() -> None:
-                try:
-                    await career_runtime.ensure_ready()
-                except (LlamaServerError, OSError):
-                    # The product remains available; Settings exposes the actionable status.
-                    return
-
-            warmup_task = asyncio.create_task(warm_up_bielik())
         yield
-        if runtime_owned_by_app:
-            if warmup_task and not warmup_task.done():
-                warmup_task.cancel()
-                with suppress(asyncio.CancelledError):
-                    await warmup_task
-            await career_runtime.stop()
-        if tailoring_runtime_owned_by_app:
-            await tailoring_runtime.stop()
 
     app = FastAPI(
         title="AI Job Scout",
@@ -495,8 +355,6 @@ def create_app(
         redoc_url=None,
         lifespan=lifespan,
     )
-    app.state.career_runtime = career_runtime
-    app.state.tailoring_runtime = tailoring_runtime
     runner = demo_runner or (
         lambda run_id, progress: _run_dummy_demo(root, database_path, run_id, progress)
     )
@@ -513,9 +371,7 @@ def create_app(
             schema_version = connection.execute(
                 "SELECT MAX(version) FROM schema_version"
             ).fetchone()[0]
-            database_ok = (
-                connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
-            )
+            database_ok = connection.execute("PRAGMA quick_check").fetchone()[0] == "ok"
             latest_run = connection.execute(
                 "SELECT status, finished_at FROM collection_runs ORDER BY started_at DESC LIMIT 1"
             ).fetchone()
@@ -524,12 +380,7 @@ def create_app(
             "database": "ok" if database_ok else "error",
             "schema_version": schema_version,
             "latest_collection": dict(latest_run) if latest_run else None,
-            "bielik": career_runtime.snapshot(),
         }
-
-    @app.get("/runtime/career/status", include_in_schema=False)
-    async def career_runtime_status() -> dict:
-        return await career_runtime.refresh_status()
 
     @app.get("/api/scans/active", include_in_schema=False)
     def scan_status() -> dict:
@@ -571,9 +422,12 @@ def create_app(
             return {"status": "idle"}
         items = list_evaluation_run_items(database_path, run["run_id"])
         return {
-            "run_id": run["run_id"], "status": run["status"],
-            "profile_id": run.get("profile_id"), "profile_version": run.get("profile_version"),
-            "stage": run.get("current_stage"), "total": run["total_items"],
+            "run_id": run["run_id"],
+            "status": run["status"],
+            "profile_id": run.get("profile_id"),
+            "profile_version": run.get("profile_version"),
+            "stage": run.get("current_stage"),
+            "total": run["total_items"],
             "completed": run["completed_items"],
             "failed": sum(item["status"] == "failed" for item in items),
             "pending": sum(item["status"] == "pending" for item in items),
@@ -584,7 +438,16 @@ def create_app(
         profile_id = str(payload.get("profile_id") or "")
         offer_ids = payload.get("offer_ids")
         if not isinstance(offer_ids, list):
-            offer_ids = [item["id"] for item in list_offers(database_path, availability="active") if item.get("needs_evaluation")]
+            profile_row = get_user_profile(database_path, profile_id)
+            if not profile_row:
+                raise HTTPException(status_code=400, detail="Choose an approved profile")
+            offer_ids = [
+                item["id"]
+                for item in list_offers(
+                    database_path, availability="active", role_visibility="visible"
+                )
+                if _offer_needs_evaluation(item, profile_row["profile"])
+            ]
         if controller.active:
             raise HTTPException(status_code=409, detail="An evaluation is already active")
         try:
@@ -604,19 +467,6 @@ def create_app(
         cancel_run(database_path, run["run_id"])
         controller.cancel()
         return {"run_id": run["run_id"], "status": "cancelled"}
-
-    @app.post("/runtime/career/start", include_in_schema=False)
-    async def start_career_runtime() -> RedirectResponse:
-        try:
-            await career_runtime.ensure_ready()
-        except LlamaServerError:
-            return RedirectResponse("/settings?bielik_error=1", status_code=303)
-        return RedirectResponse("/settings?bielik=started", status_code=303)
-
-    @app.post("/runtime/career/stop", include_in_schema=False)
-    async def stop_career_runtime() -> RedirectResponse:
-        await career_runtime.stop()
-        return RedirectResponse("/settings?bielik=stopped", status_code=303)
 
     @app.get("/manifest.webmanifest", include_in_schema=False)
     def manifest() -> FileResponse:
@@ -638,7 +488,7 @@ def create_app(
         monitoring = get_collection_monitoring(database_path)
         recent_events = list_offer_events(database_path, limit=5)
         unread_notifications = list_notifications(database_path, unread_only=True, limit=20)
-        offers = list_offers(database_path, availability="active")
+        offers = list_offers(database_path, availability="active", role_visibility="visible")
         profiles = list_user_profiles(database_path)
         in_progress = [
             item
@@ -650,7 +500,7 @@ def create_app(
         if not profiles:
             focus_title = "Zacznijmy spokojnie od Twojego profilu."
             focus_copy = (
-                "Dodaj CV, a Bielik pomoże wydobyć doświadczenie, preferencje i kierunek. "
+                "Dodaj CV, sprawdź odczyt i zatwierdź fakty profilu. "
                 "Dopiero potem porównamy je z ofertami."
             )
             primary_action = '<a class="button" href="/profiles/new">Utwórz mój profil</a>'
@@ -659,39 +509,37 @@ def create_app(
             focus_title = (
                 "CV jest gotowe. Teraz poznajmy Twój kierunek."
                 if cv_approved
-                else "Sprawdź odczyt CV, zanim zaczniemy rozmowę."
+                else "Sprawdź odczyt CV i zatwierdź profil."
             )
             focus_copy = (
-                "Bielik pomoże wydobyć doświadczenie i preferencje w małych rundach. "
+                "Uzupełnij doświadczenie i preferencje w profilu. "
                 "Brak informacji nigdy nie ukryje oferty."
                 if cv_approved
                 else "Najpierw popraw odczyt CV. Potem zdecydujesz, czy chcesz od razu "
-                "doprecyzować preferencje, czy przejść do rozmowy z Bielikiem."
+                "doprecyzować preferencje."
             )
             primary_action = (
                 f'<a class="button" href="/profiles/{escape((cv_approved or profiles)[0]["profile_id"])}">'
-                + ("Porozmawiaj z Bielikiem" if cv_approved else "Sprawdź odczyt CV")
+                + ("Uzupełnij profil" if cv_approved else "Sprawdź odczyt CV")
                 + "</a>"
             )
         else:
             focus_title = "Masz gotowy profil. Zobacz, co dziś warto sprawdzić."
             focus_copy = (
                 "Nie musisz przeglądać wszystkiego. Zacznij od najnowszych ofert, "
-                "a Bielik pomoże wyjaśnić wymagania i ryzyka."
+                "a ocena pokaże wymagania i luki w profilu."
             )
             primary_action = '<a class="button" href="/">Przejrzyj oferty</a>'
-        secondary_action = (
-            '<a class="button button--quiet" href="/chat">Zapytaj Bielika</a>'
-        )
-        profile_step = (
-            "is-done" if ready_profiles else ""
-        )
+        secondary_action = '<a class="button button--quiet" href="/profiles">Mój profil</a>'
+        profile_step = "is-done" if ready_profiles else ""
         scan_step = "is-done" if latest else ""
         decision_step = "is-done" if in_progress else ""
         active_profile_id = ready_profiles[0]["profile_id"] if len(ready_profiles) == 1 else None
-        cards = "".join(
-            _offer_card(item, profile_id=active_profile_id) for item in offers[:3]
-        )
+        if active_profile_id:
+            active_profile = get_user_profile(database_path, active_profile_id)["profile"]
+            for offer in offers:
+                offer["needs_evaluation"] = _offer_needs_evaluation(offer, active_profile)
+        cards = "".join(_offer_card(item, profile_id=active_profile_id) for item in offers[:3])
         if not cards:
             cards = (
                 '<div class="empty-state"><h3>Jeszcze cicho.</h3>'
@@ -718,7 +566,7 @@ def create_app(
           <section class="journey" aria-label="Jak działa AI Job Scout">
             <article class="journey-step {profile_step}" data-step="1">
               <h3>Poznajmy Twój profil</h3>
-              <p>CV, rozmowa i preferencje tworzą bezpieczny kontekst do porównań.</p>
+              <p>CV, zatwierdzone fakty i preferencje tworzą kontekst do porównań.</p>
               <a href="/profiles">Otwórz profil →</a>
             </article>
             <article class="journey-step {scan_step}" data-step="2">
@@ -751,16 +599,19 @@ def create_app(
     @app.get("/notifications", response_class=HTMLResponse)
     def notifications_page() -> HTMLResponse:
         notifications = list_notifications(database_path)
-        cards = "".join(
-            f"""<article class="card"><p class="company">
-            {'Nowe' if not item['read_at'] else 'Przeczytane'} ·
-            {escape(item['created_at'][:16].replace('T', ' '))}</p>
-            <h3>{escape(item['title'])}</h3><p>{escape(item['body'])}</p>
-            <div class="actions"><a class="button" href="{escape(item['private_link'])}">
-            Otwórz</a>{'' if item['read_at'] else f'<form method="post" action="/notifications/{item["notification_id"]}/read"><button class="button--quiet" type="submit">Oznacz jako przeczytane</button></form>'}</div>
+        cards = (
+            "".join(
+                f"""<article class="card"><p class="company">
+            {"Nowe" if not item["read_at"] else "Przeczytane"} ·
+            {escape(item["created_at"][:16].replace("T", " "))}</p>
+            <h3>{escape(item["title"])}</h3><p>{escape(item["body"])}</p>
+            <div class="actions"><a class="button" href="{escape(item["private_link"])}">
+            Otwórz</a>{"" if item["read_at"] else f'<form method="post" action="/notifications/{item["notification_id"]}/read"><button class="button--quiet" type="submit">Oznacz jako przeczytane</button></form>'}</div>
             </article>"""
-            for item in notifications
-        ) or '<div class="empty-state"><h2>Brak powiadomień.</h2></div>'
+                for item in notifications
+            )
+            or '<div class="empty-state"><h2>Brak powiadomień.</h2></div>'
+        )
         return layout(
             f'<div class="wrap panel-section"><div class="grid">{cards}</div></div>',
             "Powiadomienia · AI Job Scout",
@@ -795,7 +646,7 @@ def create_app(
             )
             columns.append(
                 f'<section><div class="section-heading"><div><p class="eyebrow">'
-                f'{len(items)} ofert</p><h2>{label}</h2></div></div>'
+                f"{len(items)} ofert</p><h2>{label}</h2></div></div>"
                 f'<div class="grid">{cards}</div></section>'
             )
         intro = (
@@ -810,239 +661,8 @@ def create_app(
             eyebrow="Od zainteresowania do decyzji",
         )
 
-    @app.get("/chat", response_class=HTMLResponse)
-    def bielik_chat_hub(error: str | None = Query(None)) -> HTMLResponse:
-        guide = get_or_create_app_guide(database_path)
-        profiles = list_user_profiles(database_path)
-        ready_profiles = [item for item in profiles if item["status"] == "ready"]
-        interview_profiles = [
-            item for item in profiles if item["status"] in {"ready", "cv_approved"}
-        ]
-        offers = list_offers(database_path, availability="active")
-        runtime_status = career_runtime.snapshot()
-        runtime_label = (
-            "gotowy lokalnie"
-            if runtime_status.get("ready")
-            else "uruchomi się przy wiadomości"
-        )
-        messages = "".join(
-            _app_guide_message(item) for item in guide["messages"]
-        )
-        error_html = (
-            """<p class="form-error" role="alert">Bielik nie odpowiedział, ale Twoja
-            wiadomość została zapisana. Spróbuj ponownie; aplikacja automatycznie
-            sprawdzi i uruchomi lokalny model.</p>"""
-            if error
-            else ""
-        )
-        if interview_profiles:
-            interview_links = "".join(
-                f"""<a class="button button--quiet"
-                  href="/profiles/{escape(item['profile_id'])}/interview">
-                  Wywiad: {escape(item['display_name'])}</a>"""
-                for item in interview_profiles
-            )
-            offer_links = "".join(
-                f"""<a class="guide-link" href="/offers/{item['id']}/ask">
-                  <strong>{escape(item['title'])}</strong>
-                  <span>{escape(item['company'])}</span></a>"""
-                for item in offers[:4]
-            ) or '<p class="muted">Brak aktywnych ofert do rozmowy.</p>'
-            if ready_profiles:
-                next_steps = f"""<p class="eyebrow">Pogłębione rozmowy</p>
-                  <h2>Profil jest gotowy</h2>
-                  <p class="muted">Przewodnik nadal działa, a poniżej możesz wejść
-                  do rozmów opartych na zatwierdzonych danych.</p>
-                  <div class="actions">{interview_links}</div>
-                  <hr><p class="eyebrow">Oferty</p><div class="guide-links">{offer_links}</div>"""
-            else:
-                next_steps = f"""<p class="eyebrow">Kolejny spokojny krok</p>
-                  <h2>CV jest gotowe</h2>
-                  <p class="muted">Nie ustawiaj jeszcze filtrów. Najpierw Bielik pomoże
-                  wydobyć fakty i kierunek, które później świadomie zatwierdzisz.</p>
-                  <div class="actions">{interview_links}</div>"""
-        elif profiles:
-            profile_links = "".join(
-                f"""<a class="guide-link" href="/profiles/{escape(item['profile_id'])}">
-                  <strong>{escape(item['display_name'])}</strong>
-                  <span>Sprawdź OCR i zatwierdź profil</span></a>"""
-                for item in profiles
-            )
-            next_steps = f"""<p class="eyebrow">Następny krok</p>
-              <h2>Dokończ profil</h2>
-              <p class="muted">Możesz już rozmawiać z przewodnikiem. Analiza kariery
-              i dopasowania ofert odblokuje się po zatwierdzeniu CV.</p>
-              <div class="guide-links">{profile_links}</div>"""
-        else:
-            next_steps = """<p class="eyebrow">Polecany początek</p>
-              <h2>Najpierw poznajmy Twój profil</h2>
-              <p>Możesz rozmawiać ze mną już teraz. Gdy dodasz CV, przejdziemy
-              do pogłębionego wywiadu i oceny ofert.</p>
-              <a class="button" href="/profiles/new">Dodaj profil i CV</a>
-              <hr><p class="muted">Nie masz jeszcze CV pod ręką? Zapytaj na czacie,
-              co warto przygotować.</p>"""
-
-        body = f"""<div class="guide-layout">
-          <section class="guide-chat" aria-label="Rozmowa z Bielikiem">
-            <div class="guide-chat__header"><div><p class="eyebrow">
-              {'Doradca kariery' if interview_profiles else 'Przewodnik po aplikacji'}</p>
-              <h2>Bielik</h2></div><span class="chip chip--active">
-              {escape(runtime_label)}</span></div>
-            {error_html}<div class="guide-transcript">{messages}</div>
-            <form class="guide-composer" method="post" action="/chat/messages"
-              data-pending-form data-pending-label="Bielik przygotowuje odpowiedź…">
-              <input type="hidden" name="session_id"
-                value="{escape(guide['session']['session_id'])}">
-              <label class="field">Napisz do Bielika
-                <textarea name="content" required
-                  placeholder="Np. od czego zacząć albo jak działa monitoring ofert?"></textarea>
-              </label><div class="guide-composer__actions">
-                <p class="pending-message" role="status" aria-live="polite" hidden></p>
-                <button type="submit">Wyślij</button></div>
-            </form>
-          </section>
-          <aside class="form-card guide-sidebar">{next_steps}</aside>
-        </div>"""
-        return layout(
-            f'<div class="wrap panel-section">{body}</div>',
-            "Bielik · AI Job Scout",
-            active="bielik",
-            page_title="Bielik",
-            eyebrow="Zapytaj o program, profil albo ofertę",
-        )
-
-    @app.post("/chat/messages")
-    async def send_app_guide_message(
-        session_id: str = Form(...),
-        content: str = Form(...),
-    ) -> RedirectResponse:
-        try:
-            add_app_guide_message(
-                database_path,
-                session_id=session_id,
-                role="user",
-                content=content,
-            )
-            context = build_app_guide_context(database_path, session_id)
-            if app_guide_responder:
-                turn = await app_guide_responder.respond(context)
-            else:
-                settings = Settings.from_env()
-                await career_runtime.ensure_ready()
-                system_prompt = (root / "prompts/app_guide_system_pl.md").read_text(
-                    encoding="utf-8"
-                )
-                async with LocalLlmClient(
-                    settings.career_llm_base_url,
-                    timeout_seconds=settings.local_llm_stage_timeout_seconds,
-                ) as client:
-                    turn = await BielikAppGuideResponder(
-                        client,
-                        model=settings.career_llm_model,
-                        system_prompt=system_prompt,
-                    ).respond(context)
-            persist_app_guide_turn(
-                database_path,
-                session_id=session_id,
-                turn=turn,
-            )
-        except (LocalLlmError, LlamaServerError):
-            return RedirectResponse("/chat?error=bielik_unavailable", status_code=303)
-        return RedirectResponse("/chat", status_code=303)
-
-    @app.get("/api/bielik/sessions/current", include_in_schema=False)
-    def current_bielik_session() -> dict:
-        return get_or_create_app_guide(database_path)
-
-    @app.get("/api/bielik/sessions/{session_id}", include_in_schema=False)
-    def bielik_session(session_id: str) -> dict:
-        try:
-            return get_app_guide(database_path, session_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-
-    @app.post("/api/bielik/messages", include_in_schema=False)
-    async def send_bielik_message(payload: dict[str, str]) -> dict:
-        session_id = payload.get("session_id") or get_or_create_app_guide(database_path)["session"]["session_id"]
-        content = (payload.get("content") or "").strip()
-        if not content:
-            raise HTTPException(status_code=422, detail="message is required")
-        try:
-            message_id = add_app_guide_message(
-                database_path, session_id=session_id, role="user", content=content,
-                metadata={"delivery_status": "sent"},
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-
-        async def answer() -> None:
-            update_app_guide_message_metadata(
-                database_path, message_id=message_id,
-                metadata={"delivery_status": "generating", "started_at": datetime.now(UTC).isoformat()},
-            )
-            try:
-                context = build_app_guide_context(database_path, session_id)
-                if app_guide_responder:
-                    turn = await app_guide_responder.respond(context)
-                else:
-                    settings = Settings.from_env()
-                    await career_runtime.ensure_ready()
-                    system_prompt = (root / "prompts/app_guide_system_pl.md").read_text(encoding="utf-8")
-                    async with LocalLlmClient(settings.career_llm_base_url, timeout_seconds=settings.local_llm_stage_timeout_seconds) as client:
-                        turn = await BielikAppGuideResponder(client, model=settings.career_llm_model, system_prompt=system_prompt).respond(context)
-                persist_app_guide_turn(database_path, session_id=session_id, turn=turn)
-                update_app_guide_message_metadata(
-                    database_path, message_id=message_id,
-                    metadata={"delivery_status": "answered", "answered_at": datetime.now(UTC).isoformat()},
-                )
-            except (LocalLlmError, LlamaServerError, OSError) as exc:
-                update_app_guide_message_metadata(
-                    database_path, message_id=message_id,
-                    metadata={"delivery_status": "failed", "error": f"{type(exc).__name__}: {exc}"},
-                )
-
-        asyncio.create_task(answer())
-        return {"session_id": session_id, "message_id": message_id, "status": "sent"}
-
-    @app.post("/api/bielik/messages/{message_id}/retry", include_in_schema=False)
-    async def retry_bielik_message(message_id: str) -> dict:
-        message = get_app_guide_message(database_path, message_id)
-        if not message or message["role"] != "user":
-            raise HTTPException(status_code=404, detail="Message not found")
-        if message["metadata"].get("delivery_status") not in {"failed", "sent"}:
-            raise HTTPException(status_code=409, detail="Message cannot be retried")
-        # Reuse the original message ID so a retry never creates a duplicate user turn.
-        update_app_guide_message_metadata(
-            database_path, message_id=message_id, metadata={"delivery_status": "sent"}
-        )
-
-        async def answer() -> None:
-            update_app_guide_message_metadata(
-                database_path, message_id=message_id, metadata={"delivery_status": "generating"}
-            )
-            try:
-                context = build_app_guide_context(database_path, message["session_id"])
-                if app_guide_responder:
-                    turn = await app_guide_responder.respond(context)
-                else:
-                    settings = Settings.from_env()
-                    await career_runtime.ensure_ready()
-                    system_prompt = (root / "prompts/app_guide_system_pl.md").read_text(encoding="utf-8")
-                    async with LocalLlmClient(settings.career_llm_base_url, timeout_seconds=settings.local_llm_stage_timeout_seconds) as client:
-                        turn = await BielikAppGuideResponder(client, model=settings.career_llm_model, system_prompt=system_prompt).respond(context)
-                persist_app_guide_turn(database_path, session_id=message["session_id"], turn=turn)
-                update_app_guide_message_metadata(database_path, message_id=message_id, metadata={"delivery_status": "answered"})
-            except (LocalLlmError, LlamaServerError, OSError) as exc:
-                update_app_guide_message_metadata(database_path, message_id=message_id, metadata={"delivery_status": "failed", "error": f"{type(exc).__name__}: {exc}"})
-
-        asyncio.create_task(answer())
-        return {"message_id": message_id, "status": "sent"}
-
     @app.get("/settings", response_class=HTMLResponse)
-    async def settings_page(
-        bielik: str | None = Query(None),
-        bielik_error: str | None = Query(None),
-    ) -> HTMLResponse:
+    async def settings_page() -> HTMLResponse:
         monitoring = get_collection_monitoring(database_path)
         settings = Settings.from_env()
         latest = monitoring["latest_run"]
@@ -1052,23 +672,6 @@ def create_app(
             else "brak skanu"
         )
         telegram_ready = bool(settings.telegram_bot_token and settings.telegram_chat_id)
-        bielik_status = await career_runtime.refresh_status()
-        bielik_panel = _career_runtime_panel(bielik_status, controls=True)
-        bielik_error_html = (
-            """<p class="form-error" role="alert">Nie udało się uruchomić Bielika.
-            Sprawdź status poniżej oraz <code>data/logs/bielik.log</code>.</p>"""
-            if bielik_error
-            else ""
-        )
-        bielik_feedback = {
-            "started": """<section class="success-banner" role="status">
-              <div><strong>Bielik został uruchomiony.</strong>
-              <p>Model jest gotowy do wywiadu kariery i rozmów o ofertach.</p></div>
-              <a class="button" href="/chat">Otwórz chat z Bielikiem</a>
-            </section>""",
-            "stopped": """<p class="synthetic" role="status">Bielik został zatrzymany,
-              a pamięć modelu zwolniona. Uruchomi się ponownie przy pierwszej wiadomości.</p>""",
-        }.get(bielik, "")
         content = f"""<div class="wrap panel-section">
           <section class="hero-grid">
             <article class="hero-card"><p class="eyebrow">Prywatność i kontrola</p>
@@ -1077,17 +680,14 @@ def create_app(
               Kanały zewnętrzne pozostają opcjonalne.</p></article>
             <aside class="hero-aside"><p class="eyebrow">Stan systemu</p>
               <strong>{escape(latest_status)}</strong>
-              <p class="muted">{monitoring['active_offers']} aktywnych ofert w lokalnej bazie.</p>
+              <p class="muted">{monitoring["active_offers"]} aktywnych ofert w lokalnej bazie.</p>
               <a href="/monitoring">Pełna diagnostyka źródeł →</a></aside>
           </section>
-          {bielik_error_html}
-          {bielik_feedback}
-          {bielik_panel}
           <section class="form-card"><h2>Powiadomienia</h2>
             <div class="runtime-list">
               <li><span>Skrzynka w aplikacji</span><span class="runtime-good">gotowa</span></li>
               <li><span>PWA Web Push</span><span class="runtime-warn">wymaga VAPID</span></li>
-              <li><span>Telegram (opcjonalny)</span><span class="{'runtime-good' if telegram_ready else 'runtime-warn'}">{'skonfigurowany' if telegram_ready else 'brak konfiguracji'}</span></li>
+              <li><span>Telegram (opcjonalny)</span><span class="{"runtime-good" if telegram_ready else "runtime-warn"}">{"skonfigurowany" if telegram_ready else "brak konfiguracji"}</span></li>
             </div></section>
           <section class="form-card"><h2>Tryb deweloperski</h2>
             <p class="muted">Modele, przebiegi, surowe snapshoty i diagnostyka są
@@ -1138,11 +738,20 @@ def create_app(
         company: str = Query(default=""),
         status: str = Query(default=""),
         availability: str = Query(default="active"),
+        feedback: str = Query(default=""),
+        role: str = Query(default="visible"),
+        fit: str = Query(default=""),
     ) -> HTMLResponse:
         monitoring = get_collection_monitoring(database_path)
         all_offers = list_offers(database_path)
         offers = list_offers(
-            database_path, query=q, company=company, status=status, availability=availability
+            database_path,
+            query=q,
+            company=company,
+            status=status,
+            availability=availability,
+            feedback=feedback,
+            role_visibility=role if role in {"visible", "hidden", "all"} else "visible",
         )
         companies = sorted({item["company"] for item in all_offers}, key=str.casefold)
         company_options = "".join(
@@ -1170,15 +779,32 @@ def create_app(
             if is_profile_ready_for_scoring(database_path, item["profile_id"])
         ]
         active_profile_id = ready_profiles[0]["profile_id"] if len(ready_profiles) == 1 else None
+        active_profile = (
+            get_user_profile(database_path, active_profile_id)["profile"]
+            if active_profile_id
+            else None
+        )
+        pending_evaluations = (
+            sum(
+                _offer_needs_evaluation(item, active_profile)
+                for item in all_offers
+                if item["offer"].get("role_direction") != "software"
+            )
+            if active_profile
+            else 0
+        )
+        if active_profile:
+            for offer in offers:
+                offer["needs_evaluation"] = _offer_needs_evaluation(offer, active_profile)
+        if fit == "ambitious":
+            offers = [offer for offer in offers if _is_ambitious_offer(offer)]
         evaluation_action = (
             f'''<button type="button" data-evaluate-stale data-profile-id="{escape(active_profile_id)}">
               Oceń nowe i nieaktualne</button><span class="muted">Profil: {escape(ready_profiles[0]["display_name"])} · wersja {ready_profiles[0]["current_version"]}</span>'''
             if active_profile_id
             else '<a class="button button--quiet" href="/profiles">Wybierz zatwierdzony profil do oceny</a>'
         )
-        cards = "".join(
-            _offer_card(item, profile_id=active_profile_id) for item in offers
-        )
+        cards = "".join(_offer_card(item, profile_id=active_profile_id) for item in offers)
         latest = monitoring["latest_run"]
         latest_note = (
             f"{latest['sources_ok']}/{latest['sources_total']} źródeł OK · "
@@ -1186,7 +812,9 @@ def create_app(
             if latest
             else "Nie uruchomiono jeszcze demo-v2-scan"
         )
-        filters_are_active = bool(company or status or availability != "active")
+        filters_are_active = bool(
+            company or status or feedback or fit or availability != "active" or role != "visible"
+        )
         content = f"""<div class="wrap panel-section" data-offers-page>
           <section class="operations-bar" aria-label="Pobieranie ofert">
             <div><p class="eyebrow">Pobieranie ofert</p><strong data-scan-label>{escape(latest_note)}</strong>
@@ -1198,7 +826,7 @@ def create_app(
             <dialog class="scan-dialog" data-scan-dialog aria-labelledby="scan-dialog-title">
               <form method="dialog"><button class="dialog-close" aria-label="Zamknij">×</button></form>
               <p class="eyebrow">Nowy skan</p><h2 id="scan-dialog-title">Jak szeroko sprawdzić źródła?</h2>
-              <p class="muted">Skan nie uruchomi oceny Bielika ani dopasowania do profilu.</p>
+              <p class="muted">Skan pobiera oferty; ocenę dopasowania uruchamiasz osobno.</p>
               <div class="dialog-actions"><button type="button" data-start-scan="quick">Szybki</button>
               <button type="button" class="button--quiet" data-start-scan="full">Pełny</button>
               <button type="button" class="button--quiet" data-cancel-scan hidden>Anuluj skan</button></div>
@@ -1206,7 +834,7 @@ def create_app(
             </dialog>
           </section>
           <section class="evaluation-bar" aria-label="Ocena dopasowania">
-            <div><p class="eyebrow">Ocena dopasowania</p><strong>{sum(item.get("needs_evaluation", 0) for item in all_offers)} ofert do oceny</strong>
+            <div><p class="eyebrow">Ocena dopasowania</p><strong>{pending_evaluations} ofert do oceny</strong>
               <p class="muted" data-evaluation-progress>Ocena jest niezależna od skanu i zachowuje historię wyników.</p></div>
             <div class="operations-bar__actions">{evaluation_action}<button type="button" class="button--quiet" data-cancel-evaluation hidden>Anuluj ocenę</button></div>
           </section>
@@ -1215,7 +843,7 @@ def create_app(
             <input id="offer-query" name="q" value="{escape(q)}"
               placeholder="Stanowisko, firma lub technologia…">
             <button type="submit">Szukaj</button>
-            <details class="filter-panel" {'open' if filters_are_active else ''}>
+            <details class="filter-panel" {"open" if filters_are_active else ""}>
               <summary>Więcej filtrów</summary>
               <div class="filter-grid">
                 <label class="field">Firma<select name="company">
@@ -1226,14 +854,27 @@ def create_app(
                 </select></label>
                 <label class="field">Dostępność<select name="availability">
                   {availability_options}</select></label>
+                <label class="field">Kierunek<select name="role">
+                  <option value="visible" {"selected" if role == "visible" else ""}>AI i do sprawdzenia</option>
+                  <option value="hidden" {"selected" if role == "hidden" else ""}>Ukryte role software</option>
+                  <option value="all" {"selected" if role == "all" else ""}>Wszystkie kierunki</option>
+                </select></label>
+                <label class="field">Ocena modelu<select name="feedback">
+                  <option value="">Wszystkie</option>
+                  <option value="false_negative" {"selected" if feedback == "false_negative" else ""}>Zgłoszona błędna ocena</option>
+                </select></label>
+                <label class="field">Dopasowanie<select name="fit">
+                  <option value="">Wszystkie</option>
+                  <option value="ambitious" {"selected" if fit == "ambitious" else ""}>Ambitne — kierunek AI, luki w CV</option>
+                </select></label>
                 <button type="submit">Zastosuj filtry</button>
               </div>
             </details>
           </form>
           <div class="summary-strip" role="status">
             <p><strong>{len(offers)}</strong> ofert w tym widoku ·
-              <strong>{monitoring['active_offers']}</strong> aktywnych łącznie</p>
-            <p>{escape(latest_note)} · <strong>{sum(item.get("needs_evaluation", 0) for item in all_offers)}</strong> do ponownej oceny</p>
+              <strong>{monitoring["active_offers"]}</strong> aktywnych łącznie</p>
+            <p>{escape(latest_note)} · <strong>{pending_evaluations}</strong> do ponownej oceny</p>
           </div>
           <div class="grid">{cards or "<div class='empty-state'><h3>Brak ofert</h3><p>Zmień filtry albo uruchom nowy skan.</p></div>"}</div></div>"""
         return layout(
@@ -1249,33 +890,51 @@ def create_app(
         monitoring = get_collection_monitoring(database_path)
         recent_events = list_offer_events(database_path, limit=50)
         latest = monitoring["latest_run"]
+        last_run = get_collection_run(database_path, latest["run_id"]) if latest else None
+        hidden = [
+            item for item in (last_run or {}).get("rejections", []) if item["stage"] == "role"
+        ]
+        hidden_rows = (
+            "".join(
+                f"<tr><td>{escape(item['company'])}</td><td><a href='{escape(item['url'])}' target='_blank' rel='noreferrer'>{escape(item['title'])}</a></td><td>{escape('; '.join(item['reasons']))}</td></tr>"
+                for item in hidden
+            )
+            or "<tr><td colspan='3' class='muted'>Brak ukrytych ofert software w ostatnim skanie.</td></tr>"
+        )
         if latest:
             run_summary = f"""<section class="card"><div class="company">Ostatni przebieg</div>
-              <h2>{escape(str(latest['mode']))} · {escape(str(latest['status']))}</h2>
-              <p><strong>{latest['sources_ok']}/{latest['sources_total']}</strong> źródeł OK ·
-              zapisano <strong>{latest['offers_saved']}</strong> ofert · nowe wersje <strong>{latest['new_raw_versions']}</strong> ·
-              niedostępne <strong>{latest['offers_marked_unavailable']}</strong></p>
-              <p class="muted">{escape(str(latest['finished_at'])[:19].replace('T', ' '))}</p></section>"""
+              <h2>{escape(str(latest["mode"]))} · {escape(str(latest["status"]))}</h2>
+              <p><strong>{latest["sources_ok"]}/{latest["sources_total"]}</strong> źródeł OK ·
+              zapisano <strong>{latest["offers_saved"]}</strong> ofert · nowe wersje <strong>{latest["new_raw_versions"]}</strong> ·
+              niedostępne <strong>{latest["offers_marked_unavailable"]}</strong></p>
+              <p class="muted">{escape(str(latest["finished_at"])[:19].replace("T", " "))}</p></section>"""
         else:
             run_summary = "<p class='synthetic'>Brak danych. Uruchom <code>demo-v2-scan --mode sample</code>.</p>"
-        rows = "".join(
-            f"""<tr><td>{escape(source['company'])}</td><td class="{'source-ok' if source['status'] == 'ok' else 'source-error'}">{escape(source['status'])}</td>
-            <td>{source['discovered_count']}</td><td>{source['selected_count']}</td><td>{escape(str(source['error'] or '—'))}</td></tr>"""
-            for source in monitoring["sources"]
-        ) or "<tr><td colspan='5' class='muted'>Brak przebiegu do pokazania.</td></tr>"
-        event_rows = "".join(
-            f"""<tr><td>{escape(item['created_at'][:16].replace('T', ' '))}</td>
-            <td>{escape(_event_label(item['event_type']))}</td>
-            <td><a href="/offers/{item['offer_id']}">{escape(item['company'])} — {escape(item['title'])}</a></td>
-            <td>{escape(', '.join(item['event'].get('changed_fields') or []) or '—')}</td></tr>"""
-            for item in recent_events
-        ) or "<tr><td colspan='4' class='muted'>Brak zmian do pokazania.</td></tr>"
+        rows = (
+            "".join(
+                f"""<tr><td>{escape(source["company"])}</td><td class="{"source-ok" if source["status"] == "ok" else "source-error"}">{escape(source["status"])}</td>
+            <td>{source["discovered_count"]}</td><td>{source["selected_count"]}</td><td>{escape(str(source["error"] or "—"))}</td></tr>"""
+                for source in monitoring["sources"]
+            )
+            or "<tr><td colspan='5' class='muted'>Brak przebiegu do pokazania.</td></tr>"
+        )
+        event_rows = (
+            "".join(
+                f"""<tr><td>{escape(item["created_at"][:16].replace("T", " "))}</td>
+            <td>{escape(_event_label(item["event_type"]))}</td>
+            <td><a href="/offers/{item["offer_id"]}">{escape(item["company"])} — {escape(item["title"])}</a></td>
+            <td>{escape(", ".join(item["event"].get("changed_fields") or []) or "—")}</td></tr>"""
+                for item in recent_events
+            )
+            or "<tr><td colspan='4' class='muted'>Brak zmian do pokazania.</td></tr>"
+        )
         content = f"""<div class="wrap panel-section"><p class="dev-banner"><strong>Diagnostyka techniczna.</strong>
           Codzienny health pozostaje w Ustawieniach; tutaj widać szczegóły adapterów.</p>
           {run_summary}<section><h2>Źródła z ostatniego odświeżenia</h2><div class="table-wrap"><table><thead><tr><th>Firma</th><th>Status</th><th>Odkryte</th><th>Zapisane</th><th>Informacja</th></tr></thead><tbody>{rows}</tbody></table></div></section>
           <section><h2>Historia zmian ofert</h2><div class="table-wrap"><table><thead>
           <tr><th>Kiedy</th><th>Zdarzenie</th><th>Oferta</th><th>Zmienione pola</th></tr>
           </thead><tbody>{event_rows}</tbody></table></div></section>
+          <section><h2>Ukryte oferty software</h2><p class="muted">Ostatni skan: {len(hidden)} ofert. Każdą można otworzyć u źródła.</p><div class="table-wrap"><table><thead><tr><th>Pracodawca</th><th>Oferta</th><th>Powód</th></tr></thead><tbody>{hidden_rows}</tbody></table></div></section>
           <section class="card"><div class="company">Zasada bezpieczeństwa</div><h2>„Niedostępna” oznacza potwierdzoną zmianę</h2><p class="muted">Status ustawiamy tylko po udanym, pełnym odkryciu ofert danego źródła. Błąd albo pusta odpowiedź nie usuwa historii i nie oznacza oferty jako znikniętej.</p></section></div>"""
         return layout(
             content,
@@ -1291,8 +950,7 @@ def create_app(
         profiles = list_user_profiles(database_path)
         cards = "".join(_profile_card(profile) for profile in profiles) or (
             "<div class='empty-state'><h2>Jeszcze Cię nie znamy.</h2>"
-            "<p>Dodaj CV, a następnie spokojnie sprawdzisz odczyt i porozmawiasz "
-            "z Bielikiem o tym, czego naprawdę szukasz.</p>"
+            "<p>Dodaj CV, sprawdź odczyt i zatwierdź fakty używane do oceny ofert.</p>"
             "<a class='button' href='/profiles/new'>Zacznij od CV</a></div>"
         )
         content = f"""<div class="wrap panel-section">
@@ -1345,7 +1003,9 @@ def create_app(
         profile_id = _profile_id(display_name)
         try:
             content = await cv_file.read()
-            stored_path = store_cv_bytes(database_path.parent / "profile-documents", profile_id, filename, content)
+            stored_path = store_cv_bytes(
+                database_path.parent / "profile-documents", profile_id, filename, content
+            )
             extracted = extract_cv_pdf(stored_path)
             has_legacy_profile_answers = bool(
                 _split_csv(target_roles) and location_rule.strip() and _split_lines(evidence)
@@ -1417,7 +1077,9 @@ def create_app(
         versions = list_profile_versions(database_path, profile_id)
         readiness = profile_readiness(database_path, profile_id)
         facts = "".join(f"<li>{escape(item['statement'])}</li>" for item in payload["evidence"])
-        roles = "".join(f"<span class='tag'>{escape(role)}</span>" for role in payload["target_roles"])
+        roles = "".join(
+            f"<span class='tag'>{escape(role)}</span>" for role in payload["target_roles"]
+        )
         imported_career_description = any(
             "career knowledge base" in str(item.get("source", "")).casefold()
             for item in payload.get("evidence", [])
@@ -1462,16 +1124,16 @@ def create_app(
             document_panel = f"""<section class="form-card"><div class="company">
               Wymagane zatwierdzenie</div><h2>Sprawdź odczyt CV przed użyciem w scoringu</h2>
               <p class="muted">Popraw błędy OCR i potwierdź język. Potem wybierzesz,
-              czy od razu doprecyzować kierunek, czy najpierw porozmawiać z Bielikiem.</p>
+              doprecyzuj kierunek w profilu.</p>
               <form class="form-grid" method="post"
-                action="/profiles/{escape(profile_id)}/documents/{escape(document['document_id'])}/review">
+                action="/profiles/{escape(profile_id)}/documents/{escape(document["document_id"])}/review">
                 <label class="field wide">Tekst CV po korekcie
                   <textarea name="corrected_text" required>{preview}</textarea></label>
                 <label class="field">Język oryginału
                   <select name="original_language">{language_options}</select></label>
                 <label class="field-check wide"><input type="checkbox" name="approve" required>
                   Potwierdzam, że tekst CV jest poprawny i może zostać użyty w lokalnym
-                  wywiadzie kariery.</label>
+                  ocenie ofert.</label>
                 <div class="wide"><button type="submit">Zatwierdź odczyt CV</button></div>
               </form></section>"""
         elif document:
@@ -1491,57 +1153,54 @@ def create_app(
               <p class="muted">{escape(kb_note)}</p>
               <a class="button button--quiet" href="/profiles/new">
                 Dodaj osobny profil z CV</a></section>"""
-        profile_progress_panel = (
-            f"""<section class="form-card"><div class="company">Krok 2 z 3</div>
-              <h2>Porozmawiajmy o kierunku, nie o formularzu.</h2>
-              <p class="muted">Bielik wykorzysta zatwierdzony tekst CV jako kontekst i
-              będzie pytać małymi rundami. Każdy fakt, preferencja i warunek trafi do
-              profilu dopiero po Twoim zatwierdzeniu.</p>
-              <p class="muted">Brak danych w ofercie oznacza „nie wiadomo”, nigdy
-              automatyczne odrzucenie.</p>
-              <a class="button" href="/profiles/{escape(profile_id)}/interview">
-                Rozpocznij rozmowę z Bielikiem</a></section>"""
-            if profile["status"] == "cv_approved"
-            else ""
-        )
+        profile_progress_panel = ""
         facts_panel = (
-            f"<section class=\"form-card\"><div class=\"company\">Fakty, które LLM może cytować</div><ul>{facts}</ul></section>"
+            f'<section class="form-card"><div class="company">Fakty, które LLM może cytować</div><ul>{facts}</ul></section>'
             if facts
             else ""
         )
-        approved_fact_rows = "".join(
-            f"<li><strong>{escape(item['category'])}</strong>: {escape(_profile_fact_value(item['value']))}"
-            f"<br><small>{escape(item['source_type'])} · {escape(item['source_quote'])}</small></li>"
-            for item in readiness["approved_facts"]
-        ) or "<li>Brak zatwierdzonych faktów.</li>"
-        cv_assets_panel = _cv_assets_panel(profile_id, readiness, compact=True)
-        draft_fact_rows = "".join(
-            f"""<article class="card"><strong>{escape(item['category'])}</strong>: {escape(_profile_fact_value(item['value']))}
-            <p class="muted">Źródło: {escape(item['source_quote'])}</p>
-            <form method="post" action="/profiles/{escape(profile_id)}/facts/{escape(item['fact_id'])}/review">
+        approved_fact_rows = (
+            "".join(
+                f"<li><strong>{escape(item['category'])}</strong>: {escape(_profile_fact_value(item['value']))}"
+                f"<br><small>{escape(item['source_type'])} · {escape(item['source_quote'])}</small></li>"
+                for item in readiness["approved_facts"]
+            )
+            or "<li>Brak zatwierdzonych faktów.</li>"
+        )
+        cv_assets_panel = ""
+        draft_fact_rows = (
+            "".join(
+                f"""<article class="card"><strong>{escape(item["category"])}</strong>: {escape(_profile_fact_value(item["value"]))}
+            <p class="muted">Źródło: {escape(item["source_quote"])}</p>
+            <form method="post" action="/profiles/{escape(profile_id)}/facts/{escape(item["fact_id"])}/review">
               <button name="decision" value="approve" type="submit">Zatwierdź</button>
               <button class="button--quiet" name="decision" value="reject" type="submit">Odrzuć</button>
             </form></article>"""
-            for item in readiness["draft_facts"]
-        ) or "<p class='muted'>Nie ma faktów oczekujących na decyzję.</p>"
+                for item in readiness["draft_facts"]
+            )
+            or "<p class='muted'>Nie ma faktów oczekujących na decyzję.</p>"
+        )
         missing_rows = "".join(f"<li>{escape(item)}</li>" for item in readiness["missing"])
-        conflict_rows = "".join(
-            f"""<article class="card"><strong>Sprzeczność: {escape(item['category'])}</strong>
-            <p>{escape(_profile_fact_value(item['value_a']))} ↔ {escape(_profile_fact_value(item['value_b']))}</p>
-            <form method="post" action="/profiles/{escape(profile_id)}/fact-conflicts/{escape(item['conflict_id'])}/resolve">
+        conflict_rows = (
+            "".join(
+                f"""<article class="card"><strong>Sprzeczność: {escape(item["category"])}</strong>
+            <p>{escape(_profile_fact_value(item["value_a"]))} ↔ {escape(_profile_fact_value(item["value_b"]))}</p>
+            <form method="post" action="/profiles/{escape(profile_id)}/fact-conflicts/{escape(item["conflict_id"])}/resolve">
               <label class="field">Fakt, który pozostaje aktywny<select name="winner_fact_id" required>
-                <option value="{escape(item['fact_id_a'])}">{escape(_profile_fact_value(item['value_a']))}</option>
-                <option value="{escape(item['fact_id_b'])}">{escape(_profile_fact_value(item['value_b']))}</option>
+                <option value="{escape(item["fact_id_a"])}">{escape(_profile_fact_value(item["value_a"]))}</option>
+                <option value="{escape(item["fact_id_b"])}">{escape(_profile_fact_value(item["value_b"]))}</option>
               </select></label>
               <label class="field">Jak rozstrzygasz?<input name="resolution_note" required></label>
               <button type="submit">Zapisz rozstrzygnięcie</button>
             </form></article>"""
-            for item in readiness["conflicts"]
-        ) or "<p class='muted'>Brak nierozstrzygniętych sprzeczności.</p>"
+                for item in readiness["conflicts"]
+            )
+            or "<p class='muted'>Brak nierozstrzygniętych sprzeczności.</p>"
+        )
         readiness_panel = f"""<section class="form-card"><div class="company">Gotowość profilu</div>
-          <h2>{'Profil gotowy do scoringu' if readiness['ready_for_scoring'] else 'Brakuje kilku jawnych decyzji'}</h2>
+          <h2>{"Profil gotowy do scoringu" if readiness["ready_for_scoring"] else "Brakuje kilku jawnych decyzji"}</h2>
           <p class="muted">Do scoringu trafiają wyłącznie zatwierdzone fakty z cytatem źródłowym.</p>
-          <h3>Co jeszcze ustalić</h3><ul>{missing_rows or '<li>Wszystkie wymagane obszary są opisane.</li>'}</ul>
+          <h3>Co jeszcze ustalić</h3><ul>{missing_rows or "<li>Wszystkie wymagane obszary są opisane.</li>"}</ul>
           <h3>Zatwierdzone fakty używane przez scoring</h3><ul>{approved_fact_rows}</ul>
           <h3>Sprzeczności do rozstrzygnięcia</h3>{conflict_rows}
           <h3>Dodaj fakt do weryfikacji</h3>
@@ -1556,148 +1215,41 @@ def create_app(
             <label class="field-check"><input type="checkbox" name="usable_for_scoring" checked> Można użyć w scoringu po zatwierdzeniu</label>
             <div class="wide"><button type="submit">Dodaj jako draft</button></div>
           </form><h3>Drafty do decyzji</h3>{draft_fact_rows}</section>"""
-        content = f"""<div class="wrap panel-section"><section class="hero-grid"><article class="hero-card"><span class="eyebrow">Status profilu</span><h2>{status_heading}</h2><div class="tag-row">{roles}</div><p>{escape(payload.get('location_rule') or 'Kierunek ustalimy podczas rozmowy.')}</p><p>Wersja {profile['current_version']} · {len(versions)} zapisanych wersji</p></article><aside class="hero-aside"><span class="eyebrow">CV lokalnie</span><strong>{doc_summary}</strong><p class="muted">Odczyt zostanie użyty jako kontekst dopiero po Twoim zatwierdzeniu.</p></aside></section>
+        content = f"""<div class="wrap panel-section"><section class="hero-grid"><article class="hero-card"><span class="eyebrow">Status profilu</span><h2>{status_heading}</h2><div class="tag-row">{roles}</div><p>{escape(payload.get("location_rule") or "Kierunek ustalimy podczas rozmowy.")}</p><p>Wersja {profile["current_version"]} · {len(versions)} zapisanych wersji</p></article><aside class="hero-aside"><span class="eyebrow">CV lokalnie</span><strong>{doc_summary}</strong><p class="muted">Odczyt zostanie użyty jako kontekst dopiero po Twoim zatwierdzeniu.</p></aside></section>
           {cv_assets_panel}{readiness_panel}{profile_progress_panel}{facts_panel}{document_panel}</div>"""
-        interview_action = (
-            f'<a class="button" href="/profiles/{escape(profile_id)}/interview">'
-            "Wywiad kariery</a>"
-            if profile["status"] in {"ready", "cv_approved"}
-            else ""
-        )
         return layout(
             content,
             f"Profil {profile['display_name']} · AI Job Scout",
             active="profile",
             page_title=profile["display_name"],
             eyebrow="Profil lokalny",
-            page_actions=(
-                interview_action
-                + '<a class="button button--quiet" href="/profiles/new">Dodaj kolejny</a>'
-            ),
+            page_actions='<a class="button button--quiet" href="/profiles/new">Dodaj kolejny</a>',
         )
 
     @app.post("/profiles/{profile_id}/facts")
     def create_profile_fact(
-        profile_id: str, category: str = Form(...), value: str = Form(...),
-        source_type: str = Form(...), source_ref: str = Form(...), source_quote: str = Form(...),
-        priority: str = Form(""), usable_for_scoring: str | None = Form(None),
-        usable_for_cv: str | None = Form(None),
-    ) -> RedirectResponse:
-        try:
-            save_profile_fact(database_path, profile_id=profile_id, category=category,
-                value={"text": value.strip()}, source_type=source_type, source_ref=source_ref,
-                source_quote=source_quote, priority=priority or None,
-                usable_for_scoring=bool(usable_for_scoring), usable_for_cv=bool(usable_for_cv))
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse("/cv", status_code=303)
-
-    @app.post("/profiles/{profile_id}/cv-assets/certifications")
-    def create_cv_certification(
-        profile_id: str,
-        name: str = Form(...),
-        issuer: str = Form(""),
-        note: str = Form(""),
-    ) -> RedirectResponse:
-        clean_name = name.strip()
-        clean_issuer = issuer.strip()
-        clean_note = note.strip()
-        if not clean_name:
-            raise HTTPException(status_code=400, detail="certification name is required")
-        value = {"name": clean_name}
-        if clean_issuer:
-            value["issuer"] = clean_issuer
-        if clean_note:
-            value["note"] = clean_note
-        quote = " · ".join(item for item in (clean_name, clean_issuer, clean_note) if item)
-        try:
-            save_profile_fact(
-                database_path,
-                profile_id=profile_id,
-                category="certification",
-                value=value,
-                source_type="user_message",
-                source_ref=f"profile-cv-assets:{datetime.now(UTC).isoformat()}",
-                source_quote=quote,
-                usable_for_cv=True,
-                usable_for_scoring=False,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse("/cv", status_code=303)
-
-    @app.post("/profiles/{profile_id}/cv-assets/projects")
-    def create_cv_project(
-        profile_id: str,
-        title: str = Form(...),
-        cv_description: str = Form(...),
-        technologies: str = Form(""),
-        impact: str = Form(""),
-    ) -> RedirectResponse:
-        clean_title = title.strip()
-        clean_description = cv_description.strip()
-        if not clean_title or not clean_description:
-            raise HTTPException(status_code=400, detail="project title and CV description are required")
-        tech_items = _split_comma_items(technologies)
-        value: dict[str, object] = {
-            "title": clean_title,
-            "cv_description": clean_description,
-        }
-        if tech_items:
-            value["technologies"] = tech_items
-        if impact.strip():
-            value["impact"] = impact.strip()
-        try:
-            save_profile_fact(
-                database_path,
-                profile_id=profile_id,
-                category="project",
-                value=value,
-                source_type="user_message",
-                source_ref=f"profile-cv-assets:{datetime.now(UTC).isoformat()}",
-                source_quote=" · ".join(
-                    item for item in (clean_title, clean_description, technologies, impact) if item.strip()
-                ),
-                usable_for_cv=True,
-                usable_for_scoring=False,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}", status_code=303)
-
-    @app.post("/profiles/{profile_id}/cv-assets/simple")
-    def create_cv_simple_asset(
         profile_id: str,
         category: str = Form(...),
-        text: str = Form(...),
-        tags: str = Form(""),
+        value: str = Form(...),
+        source_type: str = Form(...),
+        source_ref: str = Form(...),
+        source_quote: str = Form(...),
+        priority: str = Form(""),
+        usable_for_scoring: str | None = Form(None),
+        usable_for_cv: str | None = Form(None),
     ) -> RedirectResponse:
-        if category not in {
-            "skill",
-            "achievement",
-            "experience_bullet",
-            "profile_summary_variant",
-            "keyword",
-        }:
-            raise HTTPException(status_code=400, detail="invalid CV asset type")
-        clean_text = text.strip()
-        if not clean_text:
-            raise HTTPException(status_code=400, detail="CV asset text is required")
-        value: dict[str, object] = {"text": clean_text}
-        tag_items = _split_comma_items(tags)
-        if tag_items:
-            value["tags"] = tag_items
         try:
             save_profile_fact(
                 database_path,
                 profile_id=profile_id,
                 category=category,
-                value=value,
-                source_type="user_message",
-                source_ref=f"profile-cv-assets:{datetime.now(UTC).isoformat()}",
-                source_quote=" · ".join(item for item in (clean_text, tags) if item.strip()),
-                usable_for_cv=True,
-                usable_for_scoring=False,
+                value={"text": value.strip()},
+                source_type=source_type,
+                source_ref=source_ref,
+                source_quote=source_quote,
+                priority=priority or None,
+                usable_for_scoring=bool(usable_for_scoring),
+                usable_for_cv=bool(usable_for_cv),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -1751,228 +1303,6 @@ def create_app(
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         return RedirectResponse(f"/profiles/{profile_id}", status_code=303)
 
-    @app.get("/profiles/{profile_id}/interview", response_class=HTMLResponse)
-    def interview_page(
-        profile_id: str,
-        error: str | None = Query(None),
-    ) -> HTMLResponse:
-        profile = get_user_profile(database_path, profile_id)
-        if not profile:
-            raise HTTPException(status_code=404, detail="Profile not found")
-        interview = get_active_interview(database_path, profile_id)
-        if not interview:
-            body = """<section class="hero-grid"><article class="hero-card">
-              <p class="eyebrow">Career Interview</p><h2>CV to dopiero początek.</h2>
-              <p>Bielik przeprowadzi adaptacyjny wywiad po polsku, maksymalnie trzy
-              pytania w rundzie. Każdy wniosek wymaga osobnego zatwierdzenia.</p></article>
-              <aside class="hero-aside"><p class="eyebrow">Pamięć</p>
-              <strong>Rozmowę można przerwać i wznowić.</strong>
-              <p class="muted">Historia, streszczenie i provenance są zapisane w SQLite.</p>
-              </aside></section>
-              <form method="post" action="interview/start" data-pending-form
-                data-pending-label="Przygotowuję wywiad…">
-                <button type="submit">Rozpocznij wywiad od audytu CV</button>
-                <p class="pending-message" role="status" aria-live="polite" hidden></p>
-              </form>"""
-        else:
-            error_banner = (
-                """<p class="form-error" role="alert">Bielik jest chwilowo niedostępny.
-                Twoja odpowiedź została bezpiecznie zapisana. Aplikacja ponowi próbę
-                automatycznego uruchomienia przy kolejnej wiadomości; diagnostyka jest
-                w Ustawieniach i <code>data/logs/bielik.log</code>.</p>"""
-                if error == "bielik_unavailable"
-                else ""
-            )
-            messages = "".join(
-                f"""<article class="card"><p class="company">
-                {'Ty' if item['role'] == 'user' else 'Bielik'}</p>
-                <p>{escape(item['content'])}</p></article>"""
-                for item in interview["messages"]
-            ) or (
-                '<p class="synthetic">Sesja jest gotowa. Napisz, od czego chcesz zacząć '
-                "albo poproś o audyt CV.</p>"
-            )
-            transcript_cards = "".join(
-                _transcript_card(item, profile_id)
-                for item in list_transcripts(database_path, profile_id)
-            )
-            entries = "".join(_knowledge_entry_card(item) for item in interview["entries"])
-            knowledge_base = get_latest_knowledge_base(database_path, profile_id)
-            if knowledge_base and knowledge_base["status"] == "draft":
-                kb_panel = f"""<article class="card"><p class="company">
-                  Career Knowledge Base v{knowledge_base['version']}</p>
-                  <p>Szkic jest gotowy do jawnego zatwierdzenia.</p>
-                  <form method="post"
-                    action="knowledge-base/{knowledge_base['version']}/approve">
-                    <button type="submit">Zatwierdź wersję bazy</button></form></article>"""
-            elif knowledge_base:
-                kb_panel = f"""<article class="card"><p class="company">
-                  Career Knowledge Base v{knowledge_base['version']}</p>
-                  <p class="status-ready">Zatwierdzona i niezależna od historii czatu.</p>
-                  </article>"""
-            elif any(item["status"] == "approved" for item in interview["entries"]):
-                kb_panel = """<form method="post" action="knowledge-base">
-                  <button type="submit">Utwórz wersję Career Knowledge Base</button></form>"""
-            else:
-                kb_panel = ""
-            body = f"""{error_banner}<div class="hero-grid"><section><p class="eyebrow">
-              Etap: {escape(interview['session']['stage'])}</p>
-              <div class="grid">{messages}</div>
-              <form class="form-card" method="post" action="interview/messages"
-                data-pending-form
-                data-pending-label="Bielik uruchamia się w aplikacji i analizuje odpowiedź…">
-                <input type="hidden" name="session_id"
-                  value="{escape(interview['session']['session_id'])}">
-                <label class="field">Twoja odpowiedź
-                  <textarea name="content" required
-                    placeholder="Opowiedz konkretnie — Bielik dopyta o dowód, skalę lub efekt."></textarea>
-                </label><p><button type="submit">Wyślij do Bielika</button></p>
-                <p class="pending-message" role="status" aria-live="polite" hidden></p>
-              </form></section><aside><p class="eyebrow">Propozycje do bazy wiedzy</p>
-              {entries or '<p class="muted">Po odpowiedzi pojawią się tutaj wnioski do zatwierdzenia.</p>'}
-              {kb_panel}<hr><p class="eyebrow">Odpowiedź głosowa</p>
-              <form class="form-card" method="post" action="voice" enctype="multipart/form-data">
-                <label class="field">Nagranie audio<input type="file" name="audio_file"
-                accept="audio/*" required></label>
-                <button type="submit" {'disabled' if asr_provider is None else ''}>
-                Transkrybuj lokalnie</button>
-                <p class="muted">{'Provider ASR wymaga konfiguracji.' if asr_provider is None else 'Tekst pojawi się jako szkic do poprawy.'}</p>
-              </form>{transcript_cards}</aside></div>"""
-        return layout(
-            f'<div class="wrap panel-section">{_career_runtime_panel(career_runtime.snapshot())}{body}</div>',
-            "Wywiad kariery · AI Job Scout",
-            active="profile",
-            page_title="Wywiad kariery",
-            eyebrow=profile["display_name"],
-        )
-
-    @app.post("/profiles/{profile_id}/interview/start")
-    def start_profile_interview(profile_id: str) -> RedirectResponse:
-        try:
-            start_interview(
-                database_path,
-                profile_id=profile_id,
-                model_config={"model": Settings.from_env().career_llm_model},
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
-    @app.post("/profiles/{profile_id}/interview/messages")
-    async def send_interview_message(
-        profile_id: str,
-        session_id: str = Form(...),
-        content: str = Form(...),
-    ) -> RedirectResponse:
-        add_message(
-            database_path,
-            session_id=session_id,
-            role="user",
-            content=content,
-        )
-        context = build_interview_context(database_path, session_id)
-        try:
-            if interview_responder:
-                turn = await interview_responder.respond(context)
-            else:
-                settings = Settings.from_env()
-                await career_runtime.ensure_ready()
-                system_prompt = (
-                    root / "prompts/career_knowledge_base_system_pl.md"
-                ).read_text(encoding="utf-8")
-                async with LocalLlmClient(
-                    settings.career_llm_base_url,
-                    timeout_seconds=settings.local_llm_stage_timeout_seconds,
-                ) as client:
-                    await client.health()
-                    turn = await BielikInterviewResponder(
-                        client,
-                        model=settings.career_llm_model,
-                        system_prompt=system_prompt,
-                    ).respond(context)
-            persist_interview_turn(database_path, session_id=session_id, turn=turn)
-        except (LocalLlmError, LlamaServerError):
-            return RedirectResponse(
-                f"/profiles/{profile_id}/interview?error=bielik_unavailable",
-                status_code=303,
-            )
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
-    @app.post("/profiles/{profile_id}/voice")
-    async def transcribe_voice(
-        profile_id: str,
-        audio_file: UploadFile = File(...),
-    ) -> RedirectResponse:
-        if asr_provider is None:
-            raise HTTPException(status_code=503, detail="Local ASR provider is not configured")
-        content = await audio_file.read()
-        try:
-            audio_path, digest = store_audio_draft(
-                root / "data/audio",
-                profile_id=profile_id,
-                filename=audio_file.filename or "recording.webm",
-                content_type=audio_file.content_type or "application/octet-stream",
-                content=content,
-            )
-            result = await asr_provider.transcribe(audio_path)
-            interview = get_active_interview(database_path, profile_id)
-            save_transcript_draft(
-                database_path,
-                profile_id=profile_id,
-                session_id=interview["session"]["session_id"] if interview else None,
-                audio_path=audio_path,
-                audio_sha256=digest,
-                content_type=audio_file.content_type or "audio/webm",
-                result=result,
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
-    @app.post("/profiles/{profile_id}/voice/{transcript_id}/approve")
-    def approve_voice(
-        profile_id: str,
-        transcript_id: str,
-        corrected_text: str = Form(...),
-    ) -> RedirectResponse:
-        try:
-            approve_transcript(database_path, transcript_id, corrected_text)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
-    @app.post("/profiles/{profile_id}/knowledge/{entry_id}/{decision}")
-    def decide_knowledge_entry(
-        profile_id: str,
-        entry_id: str,
-        decision: Literal["approve", "reject"],
-    ) -> RedirectResponse:
-        try:
-            review_knowledge_entry(
-                database_path,
-                entry_id,
-                approve=decision == "approve",
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
-    @app.post("/profiles/{profile_id}/interview/knowledge-base")
-    def materialize_knowledge_base(profile_id: str) -> RedirectResponse:
-        try:
-            create_knowledge_base_version(database_path, profile_id)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
-    @app.post("/profiles/{profile_id}/interview/knowledge-base/{version}/approve")
-    def approve_knowledge_base(profile_id: str, version: int) -> RedirectResponse:
-        try:
-            approve_knowledge_base_version(database_path, profile_id, version)
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/profiles/{profile_id}/interview", status_code=303)
-
     @app.get("/lab", response_class=HTMLResponse)
     def lab_page() -> HTMLResponse:
         settings = Settings.from_env()
@@ -1982,19 +1312,29 @@ def create_app(
         runtime_checks = [
             ("llama-server", bool(shutil.which(settings.llama_server_executable))),
             ("Qwen Scout GGUF", settings.scout_llm_model_path.is_file()),
-            ("model evaluator GGUF", settings.local_llm_model_path.is_file()),
-            ("Bielik Career Interview GGUF", settings.career_llm_model_path.is_file()),
+            (
+                "model oceny ofert",
+                settings.evaluation_model == "gemini-3.8-flash"
+                or settings.evaluation_model_path.is_file(),
+            ),
             ("MLflow local path", settings.mlflow_tracking_uri.startswith("file:")),
         ]
         runtime_html = "".join(
             f"<li><span>{escape(label)}</span><span class={'runtime-good' if ready else 'runtime-warn'}>{'gotowe' if ready else 'wymaga konfiguracji'}</span></li>"
             for label, ready in runtime_checks
         )
-        model_cards = "".join(_lab_model_card(model) for model in models) or "<p class='muted'>Dodaj pierwszy profil modelu.</p>"
-        experiment_rows = "".join(_experiment_row(item) for item in experiments) or "<tr><td colspan='5' class='muted'>Brak zapisanych eksperymentów.</td></tr>"
+        model_cards = (
+            "".join(_lab_model_card(model) for model in models)
+            or "<p class='muted'>Dodaj pierwszy profil modelu.</p>"
+        )
+        experiment_rows = (
+            "".join(_experiment_row(item) for item in experiments)
+            or "<tr><td colspan='5' class='muted'>Brak zapisanych eksperymentów.</td></tr>"
+        )
         profile_options = "".join(
             f"<option value='{escape(profile['profile_id'])}'>{escape(profile['display_name'])}</option>"
-            for profile in profiles if profile["status"] == "ready"
+            for profile in profiles
+            if profile["status"] == "ready"
         )
         model_options = "".join(
             f"<option value='{escape(model['model_profile_id'])}'>{escape(model['display_name'])}</option>"
@@ -2016,24 +1356,36 @@ def create_app(
 
     @app.post("/lab/models")
     def create_lab_model(
-        display_name: str = Form(...), role: str = Form(...), model_path: str = Form(...),
-        context_size: int = Form(...), temperature: float = Form(...), seed: int = Form(...),
+        display_name: str = Form(...),
+        role: str = Form(...),
+        model_path: str = Form(...),
+        context_size: int = Form(...),
+        temperature: float = Form(...),
+        seed: int = Form(...),
     ) -> RedirectResponse:
         if role not in {"scout", "evaluator", "judge"} or not 0 <= temperature <= 2:
             raise HTTPException(status_code=400, detail="Invalid model configuration")
         save_lab_model_profile(
             database_path,
             model_profile_id=f"model-{uuid.uuid4().hex[:12]}",
-            display_name=display_name.strip(), role=role, model_path=model_path.strip(),
+            display_name=display_name.strip(),
+            role=role,
+            model_path=model_path.strip(),
             config_json={"context_size": context_size, "temperature": temperature, "seed": seed},
         )
         return RedirectResponse("/lab", status_code=303)
 
     @app.post("/lab/experiments")
     def create_lab_experiment(
-        display_name: str = Form(...), dataset_key: str = Form(...), task_kind: str = Form(...),
-        profile_id: str = Form(""), model_profile_id: str = Form(""), prompt_version: str = Form(...),
-        seed: int = Form(...), temperature: float = Form(...), max_tokens: str = Form(""),
+        display_name: str = Form(...),
+        dataset_key: str = Form(...),
+        task_kind: str = Form(...),
+        profile_id: str = Form(""),
+        model_profile_id: str = Form(""),
+        prompt_version: str = Form(...),
+        seed: int = Form(...),
+        temperature: float = Form(...),
+        max_tokens: str = Form(""),
     ) -> RedirectResponse:
         if task_kind not in {"extraction", "evaluation", "judge"} or not 0 <= temperature <= 2:
             raise HTTPException(status_code=400, detail="Invalid experiment configuration")
@@ -2043,9 +1395,17 @@ def create_app(
         save_lab_experiment(
             database_path,
             experiment_id=f"experiment-{uuid.uuid4().hex[:12]}",
-            display_name=display_name.strip(), profile_id=profile_id or None, dataset_key=dataset_key,
-            task_kind=task_kind, model_profile_id=model_profile_id or None,
-            config_json={"prompt_version": prompt_version.strip(), "seed": seed, "temperature": temperature, "max_tokens": tokens},
+            display_name=display_name.strip(),
+            profile_id=profile_id or None,
+            dataset_key=dataset_key,
+            task_kind=task_kind,
+            model_profile_id=model_profile_id or None,
+            config_json={
+                "prompt_version": prompt_version.strip(),
+                "seed": seed,
+                "temperature": temperature,
+                "max_tokens": tokens,
+            },
         )
         return RedirectResponse("/lab", status_code=303)
 
@@ -2179,8 +1539,7 @@ def create_app(
             </tr>""")
 
         status_options = "".join(
-            f'<option value="{value}" {"selected" if value == status else ""}>'
-            f"{label}</option>"
+            f'<option value="{value}" {"selected" if value == status else ""}>{label}</option>'
             for value, label in (
                 ("", "Wszystkie statusy"),
                 ("completed", "Ukończone"),
@@ -2270,8 +1629,7 @@ def create_app(
             can_resume = run["status"] in {"interrupted", "cancelled", "partial"}
             failed_count = sum(item["status"] == "failed" for item in items)
             resume_action = (
-                '<a href="/model-lab/demo"><button>'
-                'Przejdź do Laboratorium by wznowić</button></a>'
+                '<a href="/model-lab/demo"><button>Przejdź do Laboratorium by wznowić</button></a>'
                 if can_resume
                 else ""
             )
@@ -2299,7 +1657,7 @@ def create_app(
             <p><strong>{run["completed_items"]}/{run["total_items"]}</strong> ofert · {model}</p>
             <p class="muted">Tryb: {mode_label} · Profil: {profile_label} v{profile_version} ·
               Self-review: same model</p>
-            <p class="muted">Rozpoczęto: {run['started_at'][:19].replace('T', ' ')}</p>
+            <p class="muted">Rozpoczęto: {run["started_at"][:19].replace("T", " ")}</p>
           </section>
           <section><h2>Wyniki</h2><div class="grid">{cards}</div></section>
         </div>"""
@@ -2386,7 +1744,21 @@ def create_app(
             for profile in list_user_profiles(database_path)
             if is_profile_ready_for_scoring(database_path, profile["profile_id"])
         ]
-        item["evaluation_profile_id"] = ready_profiles[0]["profile_id"] if len(ready_profiles) == 1 else None
+        item["evaluation_profile_id"] = (
+            ready_profiles[0]["profile_id"] if len(ready_profiles) == 1 else None
+        )
+        if item["evaluation_profile_id"]:
+            active_profile = get_user_profile(database_path, item["evaluation_profile_id"])[
+                "profile"
+            ]
+            item["needs_evaluation"] = _offer_needs_evaluation(item, active_profile)
+            if item["needs_evaluation"]:
+                item["assessment"] = None
+        item["evaluation_feedback"] = (
+            get_current_evaluation_feedback(database_path, offer_id)
+            if item.get("assessment")
+            else None
+        )
         return layout(
             _offer_detail(item),
             item["title"],
@@ -2394,385 +1766,6 @@ def create_app(
             page_title=item["title"],
             eyebrow=item["company"],
         )
-
-    @app.get("/offers/{offer_id}/ask", response_class=HTMLResponse)
-    def offer_chat_page(
-        offer_id: int,
-        session_id: str | None = Query(None),
-        error: str | None = Query(None),
-    ) -> HTMLResponse:
-        item = get_offer(database_path, offer_id)
-        if not item:
-            raise HTTPException(status_code=404, detail="Offer not found")
-        profiles = [
-            profile
-            for profile in list_user_profiles(database_path)
-            if is_profile_ready_for_scoring(database_path, profile["profile_id"])
-        ]
-        if session_id:
-            chat = get_offer_chat(database_path, session_id)
-            if chat["session"]["offer_id"] != offer_id:
-                raise HTTPException(status_code=404, detail="Offer chat not found")
-            messages = "".join(_offer_chat_message(message) for message in chat["messages"])
-            error_html = (
-                '<p class="form-error">Nie udało się uruchomić Bielika. Twoje pytanie '
-                'zostało zapisane; szczegóły są w Ustawieniach i data/logs/bielik.log.</p>'
-                if error
-                else ""
-            )
-            body = f"""{error_html}<div class="grid">{messages}</div>
-              <form class="form-card" method="post" action="/offers/{offer_id}/ask/messages"
-                data-pending-form
-                data-pending-label="Bielik uruchamia się w aplikacji i sprawdza źródła…">
-                <input type="hidden" name="session_id" value="{escape(session_id)}">
-                <label class="field">Pytanie o ofertę<textarea name="content" required
-                placeholder="Np. czy moje CV przejdzie screening i jakie są największe ryzyka?"></textarea></label>
-                <button type="submit">Zapytaj Bielika</button>
-                <p class="pending-message" role="status" aria-live="polite" hidden></p>
-              </form>"""
-        elif profiles:
-            options = "".join(
-                f'<option value="{escape(profile["profile_id"])}">'
-                f'{escape(profile["display_name"])}</option>'
-                for profile in profiles
-            )
-            body = f"""<section class="hero-card"><p class="eyebrow">Offer Copilot</p>
-              <h2>Porozmawiaj o tej konkretnej roli.</h2>
-              <p>Bielik odpowiada z cytatami z oferty i zatwierdzonego profilu. Nie zmienia
-              profilu bez Twojej zgody.</p></section>
-              <form class="form-card" method="post" action="/offers/{offer_id}/ask/start">
-              <label class="field">Profil do porównania<select name="profile_id">{options}</select>
-              </label><button type="submit">Rozpocznij rozmowę</button></form>"""
-        else:
-            body = """<div class="empty-state"><h2>Najpierw zatwierdź profil.</h2>
-              <p>Rozmowa o ofercie wymaga sprawdzonego CV i gotowego profilu.</p>
-              <a class="button" href="/profiles">Przejdź do profilu</a></div>"""
-        return layout(
-            f'<div class="wrap panel-section">{_career_runtime_panel(career_runtime.snapshot())}{body}</div>',
-            f"Rozmowa · {item['title']}",
-            active="offers",
-            page_title="Zapytaj o ofertę",
-            eyebrow=f"{item['company']} — {item['title']}",
-        )
-
-    @app.post("/offers/{offer_id}/ask/start")
-    def start_offer_chat_route(offer_id: int, profile_id: str = Form(...)) -> RedirectResponse:
-        try:
-            session_id = start_offer_chat(
-                database_path, profile_id=profile_id, offer_id=offer_id
-            )
-        except ValueError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(
-            f"/offers/{offer_id}/ask?session_id={session_id}", status_code=303
-        )
-
-    @app.post("/offers/{offer_id}/ask/messages")
-    async def send_offer_chat_message(
-        offer_id: int,
-        session_id: str = Form(...),
-        content: str = Form(...),
-    ) -> RedirectResponse:
-        chat = get_offer_chat(database_path, session_id)
-        if chat["session"]["offer_id"] != offer_id:
-            raise HTTPException(status_code=404, detail="Offer chat not found")
-        add_offer_chat_message(
-            database_path, session_id=session_id, role="user", content=content
-        )
-        context = build_offer_chat_context(database_path, session_id)
-        try:
-            if offer_copilot_responder:
-                turn = await offer_copilot_responder.respond(context)
-            else:
-                settings = Settings.from_env()
-                await career_runtime.ensure_ready()
-                async with LocalLlmClient(
-                    settings.career_llm_base_url,
-                    timeout_seconds=settings.local_llm_stage_timeout_seconds,
-                ) as client:
-                    await client.health()
-                    turn = await BielikOfferCopilotResponder(
-                        client, settings.career_llm_model
-                    ).respond(context)
-            persist_offer_copilot_turn(
-                database_path, session_id=session_id, turn=turn
-            )
-        except (LocalLlmError, LlamaServerError):
-            return RedirectResponse(
-                f"/offers/{offer_id}/ask?session_id={session_id}&error=1",
-                status_code=303,
-            )
-        return RedirectResponse(
-            f"/offers/{offer_id}/ask?session_id={session_id}", status_code=303
-        )
-
-    @app.get("/cv", response_class=HTMLResponse)
-    def cv_hub() -> HTMLResponse:
-        profiles = [item for item in list_user_profiles(database_path) if item["status"] == "ready"]
-        cards = []
-        for profile in profiles:
-            master = get_active_master_cv(database_path, profile["profile_id"])
-            readiness = profile_readiness(database_path, profile["profile_id"])
-            if master:
-                state = "Mapa zatwierdzona" if master["status"] == "mapped" else "Sprawdź mapę"
-                action = f'<a class="button" href="/cv/{escape(master["document_id"])}">{state}</a>'
-                detail = f"{len(master['sections'])} bloków w master CV"
-            else:
-                action = ""
-                detail = "Brak mastera HTML"
-            packages = []
-            with connect(database_path) as connection:
-                rows = connection.execute(
-                    """SELECT p.package_id, p.created_at, p.page_count, o.company, o.title
-                    FROM application_packages p JOIN offers o ON o.id = p.offer_id
-                    JOIN cv_tailoring_sessions s ON s.session_id = p.session_id
-                    WHERE s.profile_id = ? ORDER BY p.created_at DESC LIMIT 3""",
-                    (profile["profile_id"],),
-                ).fetchall()
-                packages = [dict(row) for row in rows]
-            package_rows = "".join(
-                f"""<li><a href="/application-packages/{escape(item['package_id'])}">
-                {escape(item['company'])} · {escape(item['title'])}</a>
-                <small>{escape(str(item['created_at'])[:10])} · {item['page_count']} str.</small></li>"""
-                for item in packages
-            ) or "<li>Brak wygenerowanych wersji pod oferty.</li>"
-            cards.append(
-                f"""<section class="hero-grid"><article class="hero-card">
-                <p class="eyebrow">{escape(profile['display_name'])}</p>
-                <h2>CV Workspace</h2>
-                <p>{escape(detail)}</p>
-                <div class="actions">{action or ''}
-                  <a class="button button--quiet" href="/profiles/{escape(profile['profile_id'])}">Profil</a></div>
-                <form method="post" action="/cv/master" enctype="multipart/form-data">
-                  <input type="hidden" name="profile_id" value="{escape(profile['profile_id'])}">
-                  <label class="field">Master CV HTML<input type="file" name="cv_file"
-                    accept="text/html,.html" required></label>
-                  <button type="submit" {'disabled' if master else ''}>Importuj master</button>
-                </form></article>
-                <aside class="hero-aside"><span class="eyebrow">Wersje pod oferty</span>
-                <ul>{package_rows}</ul></aside></section>
-                {_cv_assets_panel(profile['profile_id'], readiness)}"""
-            )
-        body = "".join(cards) or (
-            '<div class="empty-state"><p>Najpierw przygotuj zatwierdzony profil.</p></div>'
-        )
-        return layout(
-            f'<div class="wrap panel-section">{body}</div>',
-            "CV Workspace · AI Job Scout",
-            active="cv",
-            page_title="CV Workspace",
-            eyebrow="Master, pula materiałów i wersje pod oferty",
-        )
-
-    @app.post("/cv/master")
-    async def upload_master_cv(
-        profile_id: str = Form(...), cv_file: UploadFile = File(...)
-    ) -> RedirectResponse:
-        try:
-            content = await cv_file.read()
-            document_id = import_master_cv(
-                database_path,
-                storage_root=database_path.parent / "cv-documents",
-                profile_id=profile_id,
-                filename=cv_file.filename or "master.html",
-                content=content,
-            )
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/cv/{document_id}", status_code=303)
-
-    @app.get("/cv/{document_id}", response_class=HTMLResponse)
-    def cv_mapping(document_id: str) -> HTMLResponse:
-        document = get_cv_document(database_path, document_id)
-        if not document:
-            raise HTTPException(status_code=404, detail="CV not found")
-        groups: dict[str, list[dict]] = {}
-        for item in document["sections"]:
-            groups.setdefault(item["section_kind"], []).append(item)
-        sections = "".join(
-            f"""<section><h2>{escape(kind.title())}</h2><div class="grid">
-            {''.join(f'<article class="card"><p>{escape(item["current_text"])}</p></article>' for item in items)}
-            </div></section>"""
-            for kind, items in groups.items()
-        )
-        approve = (
-            f'<form method="post" action="/cv/{escape(document_id)}/approve">'
-            '<button type="submit">Zatwierdź mapę mastera</button></form>'
-            if document["status"] == "draft" else '<p class="status-ready">Mapa zatwierdzona.</p>'
-        )
-        return layout(
-            f'<div class="wrap panel-section">{approve}{sections}</div>',
-            "Mapa CV · AI Job Scout",
-            active="applications",
-            page_title="Sprawdź mapę CV",
-            eyebrow="Zmiany będą możliwe tylko w tych blokach",
-        )
-
-    @app.post("/cv/{document_id}/approve")
-    def approve_cv_mapping(document_id: str) -> RedirectResponse:
-        try:
-            approve_master_mapping(database_path, document_id)
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/cv/{document_id}", status_code=303)
-
-    @app.get("/offers/{offer_id}/tailor", response_class=HTMLResponse)
-    def prepare_offer_cv(offer_id: int) -> HTMLResponse:
-        offer = get_offer(database_path, offer_id)
-        if not offer:
-            raise HTTPException(status_code=404, detail="Offer not found")
-        options = []
-        for profile in list_user_profiles(database_path):
-            if profile["status"] != "ready":
-                continue
-            master = get_active_master_cv(database_path, profile["profile_id"])
-            if master and master["status"] == "mapped":
-                options.append(
-                    f'<option value="{escape(profile["profile_id"])}">'
-                    f'{escape(profile["display_name"])}</option>'
-                )
-        if options:
-            form = f"""<form class="form-card" method="post"
-              action="/offers/{offer_id}/tailor/start">
-              <label>Profil<select name="profile_id">{''.join(options)}</select></label>
-              <button type="submit">Rozpocznij przygotowanie CV</button></form>"""
-        else:
-            form = '<div class="empty-state"><p>Zaimportuj i zatwierdź master CV.</p><a class="button" href="/cv">Otwórz CV</a></div>'
-        return layout(
-            f'<div class="wrap panel-section">{form}</div>',
-            "Przygotuj CV · AI Job Scout",
-            active="applications",
-            page_title=f"{offer['company']} — {offer['title']}",
-            eyebrow="Wersja CV dla jednej oferty",
-        )
-
-    @app.post("/offers/{offer_id}/tailor/start")
-    def start_offer_tailoring(offer_id: int, profile_id: str = Form(...)) -> RedirectResponse:
-        master = get_active_master_cv(database_path, profile_id)
-        if not master:
-            raise HTTPException(status_code=400, detail="Approved master CV is required")
-        try:
-            session_id = start_tailoring_session(
-                database_path,
-                profile_id=profile_id,
-                offer_id=offer_id,
-                document_id=master["document_id"],
-            )
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/tailoring/{session_id}", status_code=303)
-
-    @app.get("/tailoring/{session_id}", response_class=HTMLResponse)
-    def tailoring_review(session_id: str, error: str | None = Query(None)) -> HTMLResponse:
-        try:
-            session = get_tailoring_session(database_path, session_id)
-            offer = get_offer(database_path, int(session["offer_id"]))
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=404, detail=str(exc)) from exc
-        cards = []
-        for item in session["suggestions"]:
-            edited = escape(item["edited_html"] or item["proposed_html"])
-            cards.append(
-                f"""<article class="card"><p class="eyebrow">{escape(item['heading'])}</p>
-                <h3>{escape(item['intent'])}</h3>
-                <p><strong>Było:</strong> {escape(item['current_text'])}</p>
-                <p><strong>Propozycja:</strong> {item['proposed_html']}</p>
-                <form method="post" action="/tailoring/{escape(session_id)}/suggestions/{escape(item['suggestion_id'])}">
-                  <label>Tekst po Twojej korekcie<textarea name="edited_html">{edited}</textarea></label>
-                  <button name="decision" value="accepted" type="submit">Akceptuj</button>
-                  <button class="button--quiet" name="decision" value="rejected" type="submit">Odrzuć</button>
-                </form><p>Status: {escape(item['status'])}</p></article>"""
-            )
-        error_html = '<p class="form-error">Model lub walidacja nie zakończyły generowania.</p>' if error else ""
-        if not session["suggestions"]:
-            action = f'<form method="post" action="/tailoring/{escape(session_id)}/generate"><button type="submit">Wygeneruj propozycje Qwenem</button></form>'
-        elif any(item["status"] == "proposed" for item in session["suggestions"]):
-            action = '<p>Przejrzyj wszystkie propozycje.</p>'
-        else:
-            action = f"""<a class="button button--quiet" href="/tailoring/{escape(session_id)}/preview" target="_blank">Podgląd CV</a>
-            <form method="post" action="/tailoring/{escape(session_id)}/package"><button type="submit">Zbuduj PDF i pakiet</button></form>"""
-        package_link = ""
-        if session["status"] == "packaged":
-            with connect(database_path) as connection:
-                package = connection.execute(
-                    "SELECT package_id FROM application_packages WHERE session_id = ? ORDER BY created_at DESC LIMIT 1",
-                    (session_id,),
-                ).fetchone()
-            if package:
-                package_link = f'<a class="button" href="/application-packages/{escape(package["package_id"])}">Otwórz gotowy pakiet</a>'
-        return layout(
-            f'<div class="wrap panel-section">{error_html}<div class="actions">{action}{package_link}</div><div class="grid">{"".join(cards)}</div></div>',
-            "Tailoring CV · AI Job Scout",
-            active="applications",
-            page_title=f"{offer['company']} — {offer['title']}",
-            eyebrow=f"Status: {session['status']}",
-        )
-
-    @app.post("/tailoring/{session_id}/generate")
-    async def generate_cv_suggestions(session_id: str) -> RedirectResponse:
-        try:
-            context = build_tailoring_context(database_path, session_id)
-            if cv_tailoring_responder:
-                batch = await cv_tailoring_responder.respond(context)
-            else:
-                await tailoring_runtime.ensure_ready()
-                settings = Settings.from_env()
-                async with LocalLlmClient(
-                    settings.local_llm_base_url,
-                    timeout_seconds=settings.local_llm_stage_timeout_seconds,
-                ) as client:
-                    await client.health()
-                    batch = await QwenCvTailoringResponder(
-                        client, settings.local_llm_model
-                    ).respond(context)
-            persist_suggestion_batch(database_path, session_id=session_id, batch=batch)
-        except (CvTailoringError, LocalLlmError, LlamaServerError):
-            return RedirectResponse(f"/tailoring/{session_id}?error=1", status_code=303)
-        return RedirectResponse(f"/tailoring/{session_id}", status_code=303)
-
-    @app.post("/tailoring/{session_id}/suggestions/{suggestion_id}")
-    def review_cv_suggestion(
-        session_id: str,
-        suggestion_id: str,
-        decision: str = Form(...),
-        edited_html: str = Form(""),
-    ) -> RedirectResponse:
-        try:
-            review_suggestion(
-                database_path,
-                suggestion_id=suggestion_id,
-                decision=decision,
-                edited_html=edited_html if decision == "accepted" else None,
-            )
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/tailoring/{session_id}", status_code=303)
-
-    @app.get("/tailoring/{session_id}/preview", response_class=HTMLResponse)
-    def preview_tailored_cv(session_id: str) -> HTMLResponse:
-        try:
-            html = prepare_print_html(compose_tailored_html(database_path, session_id))
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return HTMLResponse(
-            html,
-            headers={
-                "Content-Security-Policy": "default-src 'none'; style-src 'unsafe-inline'; img-src data:",
-                "X-Content-Type-Options": "nosniff",
-            },
-        )
-
-    @app.post("/tailoring/{session_id}/package")
-    async def package_tailored_cv(session_id: str) -> RedirectResponse:
-        try:
-            package_id = await build_application_package(
-                database_path,
-                session_id=session_id,
-                storage_root=database_path.parent / "application-packages",
-            )
-        except CvTailoringError as exc:
-            raise HTTPException(status_code=400, detail=str(exc)) from exc
-        return RedirectResponse(f"/application-packages/{package_id}", status_code=303)
 
     @app.get("/application-packages/{package_id}", response_class=HTMLResponse)
     def application_package_page(package_id: str) -> HTMLResponse:
@@ -2782,7 +1775,7 @@ def create_app(
         offer = get_offer(database_path, int(package["offer_id"]))
         return layout(
             f"""<div class="wrap panel-section"><article class="form-card">
-            <p>PDF: {package['page_count']} strony A4</p>
+            <p>PDF: {package["page_count"]} strony A4</p>
             <div class="actions"><a class="button" href="/application-packages/{escape(package_id)}/cv.pdf">Pobierz CV PDF</a>
             <a class="button button--quiet" href="/application-packages/{escape(package_id)}/note">Pobierz notatkę</a>
             <a class="button button--quiet" href="/application-packages/{escape(package_id)}/open-offer" target="_blank">Otwórz formularz oferty</a></div>
@@ -2832,6 +1825,30 @@ def create_app(
             raise HTTPException(status_code=404, detail="Offer not found")
         return RedirectResponse(f"/offers/{offer_id}", status_code=303)
 
+    @app.post("/offers/{offer_id}/evaluation-feedback/false-negative")
+    def report_false_negative(
+        offer_id: int,
+        evaluation_input_sha256: str = Form(...),
+        note: str = Form(default=""),
+    ) -> RedirectResponse:
+        try:
+            saved = set_false_negative_feedback(
+                database_path, offer_id, evaluation_input_sha256, note
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=400, detail=str(exc)) from exc
+        if not saved:
+            raise HTTPException(status_code=409, detail="Ocena zmieniła się lub nie jest negatywna")
+        return RedirectResponse(f"/offers/{offer_id}", status_code=303)
+
+    @app.post("/offers/{offer_id}/evaluation-feedback/clear")
+    def clear_false_negative(
+        offer_id: int, evaluation_input_sha256: str = Form(...)
+    ) -> RedirectResponse:
+        if not clear_false_negative_feedback(database_path, offer_id, evaluation_input_sha256):
+            raise HTTPException(status_code=404, detail="Nie znaleziono zgłoszenia")
+        return RedirectResponse(f"/offers/{offer_id}", status_code=303)
+
     return app
 
 
@@ -2879,18 +1896,15 @@ def _prepare_dummy_demo_run(
     if mode == "single_offer_eval":
         if not offer_key:
             raise ValueError("Offer key required for single offer eval")
-        offers = [
-            offer
-            for offer in offers
-            if f"{offer.company}|{offer.title}" == offer_key
-        ]
+        offers = [offer for offer in offers if f"{offer.company}|{offer.title}" == offer_key]
         if not offers:
             raise ValueError("Offer not found")
 
     started_at = datetime.now(UTC)
-    run_id = "demo-flow-" + hashlib.sha256(
-        f"{started_at.isoformat()}:{profile.profile_id}".encode()
-    ).hexdigest()[:16]
+    run_id = (
+        "demo-flow-"
+        + hashlib.sha256(f"{started_at.isoformat()}:{profile.profile_id}".encode()).hexdigest()[:16]
+    )
 
     with connect(database_path) as connection:
         offer_ids = {}
@@ -2959,35 +1973,81 @@ def _prepare_live_offer_evaluation(
             offer = get_offer(database_path, int(value))
         except (TypeError, ValueError):
             continue
-        if offer and offer["availability_status"] == "active":
+        if (
+            offer
+            and offer["availability_status"] == "active"
+            and _offer_needs_evaluation(offer, profile_row["profile"])
+        ):
             selected.append(offer)
     if not selected:
         raise ValueError("There are no active offers requiring evaluation")
     started_at = datetime.now(UTC)
     run_id = "product-eval-" + uuid.uuid4().hex[:16]
     run = PipelineRun(
-        run_id=run_id, source_id="product", run_type="product_batch_eval",
-        started_at=started_at, status=EvaluationRunStatus.RUNNING, total_items=len(selected),
-        current_stage="starting", profile_id=profile.profile_id, profile_version=profile.version,
+        run_id=run_id,
+        source_id="product",
+        run_type="product_batch_eval",
+        started_at=started_at,
+        status=EvaluationRunStatus.RUNNING,
+        total_items=len(selected),
+        current_stage="starting",
+        profile_id=profile.profile_id,
+        profile_version=profile.version,
         prompt_versions={"evaluator": EVALUATOR_PROMPT_VERSION, "judge": JUDGE_PROMPT_VERSION},
-        model_configurations={"model": Settings.from_env().local_llm_model},
+        model_configurations={"model": Settings.from_env().evaluation_model},
     )
     items = []
     for offer in selected:
         payload = offer["offer"]
         snapshot = {
-            "company": offer["company"], "title": offer["title"], "url": offer["job_url"],
+            "company": offer["company"],
+            "title": offer["title"],
+            "url": offer["job_url"],
             "analysis_text": payload.get("analysis_text"),
             "supplemental_info": payload.get("supplemental_info") or {},
             "content_sha256": offer.get("current_content_sha256"),
+            "profile_id": profile.profile_id,
+            "profile_version": profile.version,
+            "model": Settings.from_env().evaluation_model,
+            "rules_version": ROLE_RULES_VERSION,
         }
-        source_hash = json.dumps(snapshot, ensure_ascii=False, sort_keys=True)
-        items.append(EvaluationRunItem(
-            item_id=f"{run_id}:{offer['id']}", run_id=run_id, offer_id=offer["id"],
-            input_sha256=hashlib.sha256(source_hash.encode()).hexdigest(), input_snapshot=snapshot,
-        ))
+        items.append(
+            EvaluationRunItem(
+                item_id=f"{run_id}:{offer['id']}",
+                run_id=run_id,
+                offer_id=offer["id"],
+                input_sha256=_evaluation_cache_key(offer, profile_row["profile"]),
+                input_snapshot=snapshot,
+            )
+        )
     create_evaluation_run(database_path, run, profile, items)
     return run_id
+
+
+def _evaluation_cache_key(offer: dict, profile: dict) -> str:
+    settings = Settings.from_env()
+    model_file = settings.evaluation_model_path
+    model_stat = model_file.stat() if model_file.is_file() else None
+    payload = {
+        "offer": offer.get("current_content_sha256"),
+        "profile_id": profile.get("profile_id"),
+        "profile_version": profile.get("version"),
+        "model": settings.evaluation_model,
+        "model_path": str(model_file),
+        "model_file": (model_stat.st_size, model_stat.st_mtime_ns) if model_stat else None,
+        "prompt": ROLE_FIT_PROMPT_VERSION,
+        "requirements": MATRIX_VERSION,
+        "rules": ROLE_RULES_VERSION,
+    }
+    return hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+
+
+def _offer_needs_evaluation(offer: dict, profile: dict) -> bool:
+    return bool(
+        offer.get("needs_evaluation")
+        or not offer.get("assessment")
+        or offer.get("evaluation_input_sha256") != _evaluation_cache_key(offer, profile)
+    )
 
 
 async def _run_dummy_demo(
@@ -3002,6 +2062,12 @@ async def _run_dummy_demo(
 
     settings = Settings.from_env()
     run = get_pipeline_run(database_path, run_id)
+    if run and run.get("run_type") in {"product_batch_eval", "live_single_offer"}:
+        from .product_evaluation import run_product_evaluation
+
+        profile = CandidateProfile.model_validate(run["profile"])
+        await run_product_evaluation(database_path, run_id, profile, settings)
+        return
     if run and run.get("profile"):
         profile = CandidateProfile.model_validate(run["profile"])
     else:
@@ -3026,17 +2092,29 @@ async def _run_dummy_demo(
     await run_demo_flow_db(database_path, run_id, offers, profile, extractions, settings)
 
 
+def _is_ambitious_offer(item: dict) -> bool:
+    assessment = item.get("assessment") or {}
+    return bool(
+        not item.get("needs_evaluation")
+        and item.get("offer", {}).get("role_direction") == "target"
+        and assessment.get("opportunity_score", 0) >= 7
+        and assessment.get("gaps")
+    )
+
+
 def _offer_card(item: dict, *, profile_id: str | None = None) -> str:
     offer = item["offer"]
     locations = _display_location(offer.get("locations") or [])
     status = STATUS_LABELS.get(item["application_status"], item["application_status"])
     availability = item.get("availability_status", "active")
-    availability_label = (
-        "Widoczna teraz" if availability == "active" else "Nie znaleziona w źródle"
-    )
+    availability_label = "Widoczna teraz" if availability == "active" else "Nie znaleziona w źródle"
     language = str(item.get("original_language") or "unknown").upper()
     assessment = {}
-    if profile_id and item.get("assessment_profile_id") == profile_id:
+    if (
+        profile_id
+        and item.get("assessment_profile_id") == profile_id
+        and not item.get("needs_evaluation")
+    ):
         assessment = item.get("assessment") or {}
     score = assessment.get("final_score")
     recommendation = {
@@ -3047,10 +2125,27 @@ def _offer_card(item: dict, *, profile_id: str | None = None) -> str:
     }.get(str(assessment.get("recommendation") or ""), "Otwórz szczegóły")
     score_html = (
         f'<span class="offer-card__score"><strong>{float(score):.1f}</strong>'
-        '<span>/ 10</span></span>'
+        "<span>/ 10 · ocena wstępna</span></span>"
         if score is not None
         else '<span class="muted">Jeszcze bez oceny</span>'
     )
+    review_chip = (
+        '<span class="chip">Do ręcznej oceny kierunku</span>'
+        if offer.get("role_direction") == "review"
+        else ""
+    )
+    hidden_chip = (
+        f'<span class="chip" title="{escape(str(offer.get("role_reason") or ""))}">'
+        "Ukryta przez filtr software</span>"
+        if offer.get("role_direction") == "software"
+        else ""
+    )
+    feedback_chip = (
+        '<span class="chip">Błędna ocena modelu</span>'
+        if item.get("has_false_negative_feedback") and not item.get("needs_evaluation")
+        else ""
+    )
+    ambitious_chip = '<span class="chip">Ambitna — sprawdź luki w CV</span>' if _is_ambitious_offer(item) else ""
     return f"""<a class="card offer-card" href="/offers/{item["id"]}">
       <div class="offer-card__top"><span class="offer-card__company">
         {escape(item["company"])}</span>
@@ -3058,7 +2153,7 @@ def _offer_card(item: dict, *, profile_id: str | None = None) -> str:
       <h2>{escape(item["title"])}</h2>
       <p class="offer-card__location">{escape(locations)}</p>
       <div class="chips"><span class="chip" title="Język oryginału">{escape(language)}</span>
-      <span class="chip">{escape(status)}</span></div>
+      <span class="chip">{escape(status)}</span>{review_chip}{hidden_chip}{feedback_chip}{ambitious_chip}</div>
       <div class="offer-card__footer">{score_html}
         <span class="offer-card__next">{escape(recommendation)} →</span></div>
     </a>"""
@@ -3093,24 +2188,12 @@ def _offer_event_card(item: dict) -> str:
         if item["event_type"] == "disappeared"
         else "Dostępność oferty została zaktualizowana."
     )
-    return f"""<a class="card" href="/offers/{item['offer_id']}">
-      <div class="company">{escape(_event_label(item['event_type']))}</div>
-      <h3>{escape(item['company'])} — {escape(item['title'])}</h3>
+    return f"""<a class="card" href="/offers/{item["offer_id"]}">
+      <div class="company">{escape(_event_label(item["event_type"]))}</div>
+      <h3>{escape(item["company"])} — {escape(item["title"])}</h3>
       <p class="muted">{escape(detail)}</p>
-      <p class="muted">{escape(item['created_at'][:16].replace('T', ' '))}</p>
+      <p class="muted">{escape(item["created_at"][:16].replace("T", " "))}</p>
     </a>"""
-
-
-def _offer_chat_message(message: dict) -> str:
-    citations = "".join(
-        f"<li>“{escape(item['quote'])}” "
-        f"<span class='muted'>({escape(item['source_field'])})</span></li>"
-        for item in message["citations"]
-    )
-    citation_html = f"<ul>{citations}</ul>" if citations else ""
-    return f"""<article class="card"><p class="company">
-      {'Ty' if message['role'] == 'user' else 'Bielik'}</p>
-      <p>{escape(message['content'])}</p>{citation_html}</article>"""
 
 
 def _evaluation_card(item: dict) -> str:
@@ -3125,12 +2208,10 @@ def _evaluation_card(item: dict) -> str:
             "failed": "Błąd oceny",
         }.get(status, status)
         error = item.get("error")
-        error_html = (
-            f'<p class="warning">{escape(str(error))}</p>' if error else ""
-        )
+        error_html = f'<p class="warning">{escape(str(error))}</p>' if error else ""
         return f"""<article class="card">
-          <div class="company">{escape(item['company'])}</div>
-          <h2>{escape(item['title'])}</h2>
+          <div class="company">{escape(item["company"])}</div>
+          <h2>{escape(item["title"])}</h2>
           <p class="run-status">{escape(status_label)}</p>{error_html}
           {_technical_details(item)}
         </article>"""
@@ -3173,14 +2254,20 @@ def _technical_details(item: dict) -> str:
     retry_counts = item.get("retry_counts") or {}
     if not timings and not retry_counts:
         return ""
-    timing_rows = "".join(
-        f"<li>{escape(str(stage))}: {escape(str(elapsed))} ms</li>"
-        for stage, elapsed in sorted(timings.items())
-    ) or "<li>Brak timingów</li>"
-    retry_rows = "".join(
-        f"<li>{escape(str(stage))}: {escape(str(count))}</li>"
-        for stage, count in sorted(retry_counts.items())
-    ) or "<li>Brak retry</li>"
+    timing_rows = (
+        "".join(
+            f"<li>{escape(str(stage))}: {escape(str(elapsed))} ms</li>"
+            for stage, elapsed in sorted(timings.items())
+        )
+        or "<li>Brak timingów</li>"
+    )
+    retry_rows = (
+        "".join(
+            f"<li>{escape(str(stage))}: {escape(str(count))}</li>"
+            for stage, count in sorted(retry_counts.items())
+        )
+        or "<li>Brak retry</li>"
+    )
     return f"""<details><summary>Diagnostyka</summary>
       <p><strong>Timingi</strong></p><ul>{timing_rows}</ul>
       <p><strong>Retry</strong></p><ul>{retry_rows}</ul>
@@ -3210,78 +2297,6 @@ def _profile_id(display_name: str) -> str:
     return f"{base[:40]}-{uuid.uuid4().hex[:8]}"
 
 
-def _app_guide_message(item: dict) -> str:
-    role = str(item["role"])
-    actions = "".join(
-        f"""<a class="button button--quiet"
-          href="{escape(str(action['path']))}">{escape(str(action['label']))}</a>"""
-        for action in item.get("metadata", {}).get("actions", [])
-    )
-    action_row = f'<div class="guide-message__actions">{actions}</div>' if actions else ""
-    return f"""<article class="guide-message guide-message--{escape(role)}">
-      <p class="company">{'Bielik' if role == 'assistant' else 'Ty'}</p>
-      <p>{escape(str(item['content']))}</p>{action_row}</article>"""
-
-
-def _career_runtime_panel(status: dict, *, controls: bool = False) -> str:
-    state = str(status.get("state") or "idle")
-    labels = {
-        "idle": (
-            "Bielik czeka na uruchomienie",
-            "Aplikacja ładuje go w tle albo przy pierwszej wiadomości.",
-            "runtime-warn",
-        ),
-        "starting": (
-            "Bielik uruchamia się",
-            "Pierwsze załadowanie modelu może potrwać około minuty.",
-            "runtime-warn",
-        ),
-        "ready": (
-            "Bielik jest gotowy",
-            (
-                "Model jest zarządzany przez aplikację."
-                if status.get("managed")
-                else "Aplikacja korzysta z lokalnego, zgodnego procesu."
-            ),
-            "runtime-good",
-        ),
-        "error": (
-            "Nie udało się uruchomić Bielika",
-            str(status.get("detail") or "Sprawdź data/logs/bielik.log."),
-            "source-error",
-        ),
-        "unavailable": (
-            "Brak modelu Bielik",
-            str(status.get("detail") or "Nie znaleziono lokalnego pliku GGUF."),
-            "source-error",
-        ),
-    }
-    label, detail, css_class = labels.get(state, labels["idle"])
-    if controls and state == "ready" and status.get("managed"):
-        controls_html = """<div class="actions runtime-controls">
-          <form method="post" action="/runtime/career/stop">
-            <button class="button--quiet" type="submit">Zwolnij pamięć</button>
-          </form>
-        </div>"""
-    elif controls and state != "ready":
-        controls_html = """<div class="actions runtime-controls">
-          <form method="post" action="/runtime/career/start" data-pending-form
-            data-pending-label="Ładuję Bielika do pamięci…">
-            <button type="submit">Uruchom Bielika</button>
-            <p class="pending-message" role="status" aria-live="polite" hidden></p>
-          </form>
-        </div>"""
-    else:
-        controls_html = ""
-    return f"""<section class="form-card runtime-card" data-career-runtime>
-      <div><p class="eyebrow">Lokalny doradca kariery</p>
-      <h2>Bielik w aplikacji</h2>
-      <p class="muted" data-runtime-detail>{escape(detail)}</p>{controls_html}</div>
-      <p class="{css_class}" role="status" aria-live="polite"
-        data-runtime-state data-state="{escape(state)}">{escape(label)}</p>
-    </section>"""
-
-
 def _profile_form(*, error: str | None = None) -> str:
     error_html = f'<p class="form-error">{escape(error)}</p>' if error else ""
     return f"""<div class="wrap panel-section"><section class="hero-grid">
@@ -3290,9 +2305,8 @@ def _profile_form(*, error: str | None = None) -> str:
         <p>PDF zostanie odczytany lokalnie. Jeśli to skan, uruchomimy OCR po polsku
         i angielsku. W następnym kroku zobaczysz cały tekst przed zatwierdzeniem.</p>
       </article><aside class="hero-aside"><span class="eyebrow">Bez ankiety na start</span>
-        <strong>Najpierw plik, potem rozmowa</strong>
-        <p class="muted">Role, preferencje i warunki doprecyzujesz później — samodzielnie
-        albo podczas rozmowy z Bielikiem.</p></aside></section>{error_html}
+        <strong>Najpierw plik, potem zatwierdzenie</strong>
+        <p class="muted">Role, preferencje i warunki doprecyzujesz w profilu po sprawdzeniu CV.</p></aside></section>{error_html}
       <form class="form-card form-grid" method="post" action="/profiles"
         enctype="multipart/form-data">
         <label class="field wide">Twoje CV w PDF
@@ -3323,7 +2337,9 @@ def _cv_first_profile_draft(profile_id: str) -> dict:
 
 def _profile_card(profile: dict) -> str:
     payload = profile["profile"]
-    roles = "".join(f"<span class='tag'>{escape(role)}</span>" for role in payload["target_roles"][:3])
+    roles = "".join(
+        f"<span class='tag'>{escape(role)}</span>" for role in payload["target_roles"][:3]
+    )
     imported_career_description = any(
         "career knowledge base" in str(item.get("source", "")).casefold()
         for item in payload.get("evidence", [])
@@ -3344,61 +2360,25 @@ def _profile_card(profile: dict) -> str:
         "cv_review": "Sprawdź odczyt CV",
         "draft": "Szkic",
     }.get(profile["status"], "Wymaga uwagi")
-    return f"""<a class="card profile-card" href="/profiles/{escape(profile['profile_id'])}">
-      <div class="company">{escape(status_label)}</div><h2>{escape(profile['display_name'])}</h2>
+    return f"""<a class="card profile-card" href="/profiles/{escape(profile["profile_id"])}">
+      <div class="company">{escape(status_label)}</div><h2>{escape(profile["display_name"])}</h2>
       <div class="tag-row">{roles}</div><p class="muted">{document}</p>
-      <p class="{'status-ready' if profile['status'] == 'ready' else 'status-draft'}">{status_label} →</p></a>"""
-
-
-def _knowledge_entry_card(entry: dict) -> str:
-    actions = ""
-    if entry["status"] == "proposed":
-        base = (
-            f"/profiles/{escape(entry['profile_id'])}/knowledge/"
-            f"{escape(entry['entry_id'])}"
-        )
-        actions = f"""<div class="actions">
-          <form method="post" action="{base}/approve">
-            <button type="submit">Zatwierdź</button></form>
-          <form method="post" action="{base}/reject">
-            <button class="button--quiet" type="submit">Odrzuć</button></form></div>"""
-    source_label = {
-        "cv_verified": "CV",
-        "user_stated": "Twoja wypowiedź",
-        "hypothesis": "Hipoteza Bielika",
-    }.get(entry["provenance"], entry["provenance"])
-    return f"""<article class="card"><p class="company">{escape(source_label)} ·
-      {escape(entry['status'])}</p><h3>{escape(entry['category'])}</h3>
-      <p>{escape(entry['statement_original'])}</p>{actions}</article>"""
-
-
-def _transcript_card(item: dict, profile_id: str) -> str:
-    text = item["corrected_text"] or item["raw_text"]
-    if item["status"] == "draft":
-        return f"""<form class="card" method="post"
-          action="/profiles/{escape(profile_id)}/voice/{escape(item['transcript_id'])}/approve">
-          <p class="company">Szkic ASR · {escape(item['detected_language'] or 'unknown')}</p>
-          <label class="field">Sprawdź przed użyciem<textarea name="corrected_text"
-          required>{escape(text)}</textarea></label>
-          <button type="submit">Zatwierdź transkrypcję</button></form>"""
-    return f"""<article class="card"><p class="company">Transkrypcja zatwierdzona</p>
-      <p>{escape(text)}</p><p class="muted">Możesz wkleić tekst jako kolejną odpowiedź.
-      Samo zatwierdzenie nie zmienia bazy wiedzy.</p></article>"""
+      <p class="{"status-ready" if profile["status"] == "ready" else "status-draft"}">{status_label} →</p></a>"""
 
 
 def _lab_model_card(model: dict) -> str:
     config = model["config"]
     path_exists = Path(model["model_path"]).is_file()
-    return f"""<article class="card lab-card"><div class="company">{escape(model['role'])}</div>
-      <h3>{escape(model['display_name'])}</h3><p class="muted">{escape(model['model_path'])}</p>
-      <div class="tag-row"><span class="tag">ctx {config.get('context_size')}</span><span class="tag">T {config.get('temperature')}</span><span class="tag">seed {config.get('seed')}</span></div>
-      <p class="{'runtime-good' if path_exists else 'runtime-warn'}">{'Plik lokalny wykryty' if path_exists else 'Ścieżka modelu nie istnieje'}</p></article>"""
+    return f"""<article class="card lab-card"><div class="company">{escape(model["role"])}</div>
+      <h3>{escape(model["display_name"])}</h3><p class="muted">{escape(model["model_path"])}</p>
+      <div class="tag-row"><span class="tag">ctx {config.get("context_size")}</span><span class="tag">T {config.get("temperature")}</span><span class="tag">seed {config.get("seed")}</span></div>
+      <p class="{"runtime-good" if path_exists else "runtime-warn"}">{"Plik lokalny wykryty" if path_exists else "Ścieżka modelu nie istnieje"}</p></article>"""
 
 
 def _experiment_row(item: dict) -> str:
-    return f"""<tr><td>{escape(item['display_name'])}</td><td>{escape(item['task_kind'])}</td>
-      <td>{escape(item['dataset_key'])}</td><td>{escape(str(item['model_name'] or 'nie wybrano'))}</td>
-      <td>{escape(item['status'])}</td></tr>"""
+    return f"""<tr><td>{escape(item["display_name"])}</td><td>{escape(item["task_kind"])}</td>
+      <td>{escape(item["dataset_key"])}</td><td>{escape(str(item["model_name"] or "nie wybrano"))}</td>
+      <td>{escape(item["status"])}</td></tr>"""
 
 
 def _offer_detail(item: dict) -> str:
@@ -3426,9 +2406,7 @@ def _offer_detail(item: dict) -> str:
             "Zatwierdzona kanoniczna wersja angielska jest gotowa do porównania z profilem."
         )
     elif translation:
-        language_path = (
-            "Wersja angielska jest szkicem i nie zostanie użyta bez zatwierdzenia."
-        )
+        language_path = "Wersja angielska jest szkicem i nie zostanie użyta bez zatwierdzenia."
     else:
         language_path = (
             "Ocena bezpośrednia jest możliwa; kanoniczna wersja angielska nie została "
@@ -3445,16 +2423,26 @@ def _offer_detail(item: dict) -> str:
         evidence_by_section.setdefault(entry["section_kind"], []).append(entry)
     description = escape(offer.get("description") or "")
     versions = item.get("versions") or []
-    version_items = "".join(
-        f"<li><strong>{escape(_event_label(version['change_kind']))}</strong> · "
-        f"{escape(version['created_at'][:19].replace('T', ' '))} · "
-        f"{escape(', '.join(version['changed_fields']) or 'pierwsza wersja')}</li>"
-        for version in versions
-    ) or "<li>Brak wersji historycznych.</li>"
+    version_items = (
+        "".join(
+            f"<li><strong>{escape(_event_label(version['change_kind']))}</strong> · "
+            f"{escape(version['created_at'][:19].replace('T', ' '))} · "
+            f"{escape(', '.join(version['changed_fields']) or 'pierwsza wersja')}</li>"
+            for version in versions
+        )
+        or "<li>Brak wersji historycznych.</li>"
+    )
     evaluation_state = (
         "Treść zmieniła się — oferta czeka na ponowną ocenę."
         if item.get("needs_evaluation")
         else "Ocena odpowiada bieżącej wersji treści."
+    )
+    role_note = (
+        f"<p class='muted'>Kierunek oferty wymaga ręcznej oceny: {escape(str(offer.get('role_reason') or 'opis jest niejednoznaczny'))}</p>"
+        if offer.get("role_direction") == "review"
+        else f"<p class='muted'>Ukryta przez filtr software: {escape(str(offer.get('role_reason') or 'przeważają obowiązki software'))}. Możesz ją zapisać lub zmienić etap aplikacji.</p>"
+        if offer.get("role_direction") == "software"
+        else ""
     )
     status_buttons = "".join(
         f'<form method="post" action="/offers/{item["id"]}/status/{value}">'
@@ -3464,8 +2452,36 @@ def _offer_detail(item: dict) -> str:
     )
     evaluation_button = (
         f'<button type="button" data-evaluate-stale data-profile-id="{escape(item["evaluation_profile_id"])}">Oceń tę ofertę</button>'
-        if item.get("evaluation_profile_id") else '<a class="button button--quiet" href="/profiles">Wybierz profil do oceny</a>'
+        if item.get("evaluation_profile_id")
+        else '<a class="button button--quiet" href="/profiles">Wybierz profil do oceny</a>'
     )
+    assessment = item.get("assessment") or {}
+    feedback = item.get("evaluation_feedback")
+    evaluation_hash = escape(str(item.get("evaluation_input_sha256") or ""))
+    if feedback:
+        feedback_section = f"""<section class="form-card">
+          <h2>Błędna ocena modelu</h2>
+          <p>Zgłosiłaś, że ta oferta może Ci pasować mimo negatywnej oceny modelu.</p>
+          <form method="post" action="/offers/{item["id"]}/evaluation-feedback/clear">
+            <input type="hidden" name="evaluation_input_sha256" value="{evaluation_hash}">
+            <button type="submit" class="button--quiet">Cofnij zgłoszenie</button>
+          </form></section>"""
+    elif (
+        evaluation_hash
+        and not item.get("needs_evaluation")
+        and assessment.get("recommendation") in {"low_priority", "prepare_first"}
+    ):
+        feedback_section = f"""<section class="form-card">
+          <h2>Model ocenił ofertę jako niepasującą?</h2>
+          <p>Jeśli uważasz, że pasuje, oznacz błędną ocenę. To nie zmienia etapu aplikacji.</p>
+          <form method="post" action="/offers/{item["id"]}/evaluation-feedback/false-negative">
+            <input type="hidden" name="evaluation_input_sha256" value="{evaluation_hash}">
+            <label class="field">Co model przeoczył? (opcjonalnie)
+              <textarea name="note" maxlength="1000" rows="2"></textarea></label>
+            <button type="submit">Błędna ocena — oferta mi pasuje</button>
+          </form></section>"""
+    else:
+        feedback_section = ""
     responsibilities_section = _offer_evidence_section(
         "Obowiązki", evidence_by_section.get("responsibilities", [])
     )
@@ -3498,23 +2514,20 @@ def _offer_detail(item: dict) -> str:
         <span class="chip">Umowa: {escape(str(employment_type))}</span>
         <span class="chip">Senior: {escape(str(seniority))}</span>
         <span class="chip">Język: {escape(language)}</span></div>
-      <p class="muted">Opublikowano: {escape(str(published_at)[:19].replace('T', ' '))}</p>
+      <p class="muted">Opublikowano: {escape(str(published_at)[:19].replace("T", " "))}</p>
       <p>Aktualny status: <strong>{current_status}</strong></p>
       <p><span class="chip chip--{escape(availability)}">{availability_label}</span>
-      <span class="muted">· sprawdzono: {escape(str(availability_meta)[:19].replace('T', ' '))}</span></p>
+      <span class="muted">· sprawdzono: {escape(str(availability_meta)[:19].replace("T", " "))}</span></p>
       <p class="muted">Pewność rozpoznania języka: {escape(confidence_label)}</p>
       <p class="muted">{escape(language_path)}</p>
+      {role_note}
       <div class="actions">{status_buttons}
         {evaluation_button}
-        <a class="button" href="/offers/{item["id"]}/tailor">Przygotuj CV</a>
-        <a class="button button--quiet" href="/offers/{item["id"]}/ask">
-          Zapytaj Bielika
-        </a>
         <a class="button" href="{escape(item["job_url"])}" target="_blank" rel="noreferrer">
           Otwórz ofertę ↗
         </a>
       </div>
-      {decision_card}
+      {decision_card}{feedback_section}
       <section><h2>Najważniejsze informacje</h2><p class="muted">Każdy wykryty element można sprawdzić w cytacie ze źródła.</p>
       {conditions_section}</section>
       {responsibilities_section}{requirements_section}{benefits_section}{travel_section}
@@ -3544,22 +2557,26 @@ def _offer_decision_card(item: dict, evidence_by_section: dict[str, list[dict]])
         return f"""<section class="form-card"><div class="company">Karta decyzji</div>
           <h2>Oferta nie została jeszcze oceniona</h2>
           <p class="muted">Uruchom ocenę po wyborze profilu gotowego do scoringu.</p>
-          <p><strong>Niewiadome:</strong> {escape(', '.join(unknowns) or 'brak')}</p></section>"""
+          <p><strong>Niewiadome:</strong> {escape(", ".join(unknowns) or "brak")}</p></section>"""
     score = assessment.get("final_score")
     recommendation = assessment.get("recommendation") or "brak rekomendacji"
     strengths = assessment.get("strengths") or []
     gaps = assessment.get("gaps") or []
     assessment_evidence = assessment.get("evidence") or []
-    evidence_rows = "".join(
-        f"<li>“{escape(str(entry.get('quote') or ''))}” "
-        f"<span class='muted'>({escape(str(entry.get('source_field') or ''))})</span></li>"
-        for entry in assessment_evidence
-    ) or "<li>Brak cytatów z oceny — wynik wymaga ponownej oceny.</li>"
+    evidence_rows = (
+        "".join(
+            f"<li>“{escape(str(entry.get('quote') or ''))}” "
+            f"<span class='muted'>({escape(str(entry.get('source_field') or ''))})</span></li>"
+            for entry in assessment_evidence
+        )
+        or "<li>Brak cytatów z oceny — wynik wymaga ponownej oceny.</li>"
+    )
     return f"""<section class="form-card"><div class="company">Karta decyzji</div>
-      <h2>{escape(str(recommendation))} · {escape(str(score if score is not None else 'unknown'))}/10</h2>
-      <p><strong>Dopasowanie:</strong> {escape(', '.join(map(str, strengths)) or 'Nie wskazano.')}</p>
-      <p><strong>Ryzyka i luki:</strong> {escape(', '.join(map(str, gaps)) or 'Nie wskazano.')}</p>
-      <p><strong>Niewiadome:</strong> {escape(', '.join(unknowns) or 'brak')}</p>
+      <h2>{escape(str(recommendation))} · {escape(str(score if score is not None else "unknown"))}/10</h2>
+      <p class="warning">Ocena wstępna: obecny model nie przeszedł progu jakości. Sprawdź obowiązki i wymagania przed decyzją.</p>
+      <p><strong>Dopasowanie:</strong> {escape(", ".join(map(str, strengths)) or "Nie wskazano.")}</p>
+      <p><strong>Wymagania do sprawdzenia:</strong> {escape(", ".join(map(str, gaps)) or "Nie wskazano; nie oznacza to braku luk.")}</p>
+      <p><strong>Niewiadome:</strong> {escape(", ".join(unknowns) or "brak")}</p>
       <details><summary>Dowody oceny</summary><ul>{evidence_rows}</ul></details></section>"""
 
 
@@ -3590,6 +2607,7 @@ def _offer_evidence_section(
 
 def _render_demo_start_form(project_root: Path, database_path: Path) -> str:
     from .demo_data import load_frozen_demo_offers
+
     try:
         offers = load_frozen_demo_offers(
             project_root / "config/demo/frozen-offers-v1.json", project_root
@@ -3604,12 +2622,12 @@ def _render_demo_start_form(project_root: Path, database_path: Path) -> str:
     )
     live_options = "".join(
         f'<option value="live:{item["id"]}">{escape(item["company"])} — '
-        f'{escape(item["title"])}</option>'
+        f"{escape(item['title'])}</option>"
         for item in list_offers(database_path)
     )
     profile_options = "".join(
         f'<option value="{escape(profile["profile_id"])}">'
-        f'{escape(profile["display_name"])} (potwierdzony)</option>'
+        f"{escape(profile['display_name'])} (potwierdzony)</option>"
         for profile in list_user_profiles(database_path)
         if is_profile_ready_for_scoring(database_path, profile["profile_id"])
     )

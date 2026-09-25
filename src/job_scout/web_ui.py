@@ -21,9 +21,7 @@ _templates = Environment(
 PRODUCT_NAV = (
     ("today", "/today", "Start"),
     ("offers", "/", "Oferty"),
-    ("bielik", "/chat", "Bielik"),
     ("applications", "/applications", "Aplikacje"),
-    ("cv", "/cv", "CV"),
     ("profile", "/profiles", "Profil"),
 )
 

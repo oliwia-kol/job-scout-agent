@@ -1,53 +1,34 @@
 # AI Job Scout
 
-AI Job Scout is a local-first app for finding and reviewing job opportunities. It collects listings from company career pages, keeps offer history in SQLite, and helps compare jobs with an approved profile built from a CV. The FastAPI dashboard runs on your computer.
+AI Job Scout is a local Python application that collects job listings, filters roles by their dominant duties, and compares relevant offers with a CV profile approved by the user. The web interface supports offer review, application status tracking, profile approval, source monitoring, and evaluation history.
 
-The public repository contains application code, tests, and synthetic demo data. Personal CVs, profiles, databases, model files, and evaluation reports are kept out of version control.
+## Architecture
 
-## What it does
-
-- Collects offers from configured company sources and tracks changes without removing saved offers when a source fails.
-- Provides a local dashboard for offers, applications, source monitoring, profiles, notifications, and model experiments.
-- Imports a PDF CV, including scanned PDFs through local OCR, and requires profile review before using its facts for scoring.
-- Uses local models to help assess offers. The score covers opportunity, screening strength, work conditions, and development potential. Review model judgments before acting on them.
-- Lets you maintain approved CV material and prepare a tailored English PDF for an offer. You review proposed changes and submit applications yourself.
-
-Optional Notion and Telegram integrations support a separate workflow. SQLite remains the local source of truth for the dashboard.
+1. **Collect:** source adapters fetch company career pages and Just Join IT listings. The collector cleans full descriptions, deduplicates offers by URL, and records source failures without expiring previously saved offers.
+2. **Store:** SQLite keeps offers, content versions, scan runs, approved profile versions, assessments, and user feedback.
+3. **Screen:** deterministic duty rules hide clear software and platform roles from the default view. Mixed roles remain available for review.
+4. **Evaluate:** a local Qwen model compares offer fragments with approved CV facts. The application resolves evidence IDs to original quotes, checks cited profile facts, adds explicit CV proof gaps, and caps preliminary recommendations. Cache keys include the offer, profile, model, prompt, and rule versions.
+5. **Review:** the user can inspect hidden roles, evaluation evidence, and application statuses in the FastAPI interface. Gemini evaluation is also available through an explicitly configured API key.
 
 ## Run locally
 
-Requires Python 3.11+ and [`uv`](https://docs.astral.sh/uv/). Local model evaluation also requires a configured model runtime; scanned CVs require Tesseract. See [SETUP.md](SETUP.md) for configuration.
+Requires Python 3.11+, [`uv`](https://docs.astral.sh/uv/), and `llama-server` with `Qwen3.5-9B-Q4_K_M.gguf` at `models/Qwen3.5-9B-Q4_K_M.gguf` for local evaluation.
 
 ```bash
-uv sync --extra dev
-cp .env.example .env
+uv sync
 uv run python main.py init-db
 uv run python main.py serve
 ```
 
-Open `http://127.0.0.1:8765/`.
-
-Useful commands:
+Open `http://127.0.0.1:8765/`. To validate configured sources or collect a new sample:
 
 ```bash
 uv run python main.py check-config
 uv run python main.py demo-v2-scan --mode sample
-uv run python main.py demo-v2-scan --mode full
 ```
 
-The sample scan limits accepted offers per source; the full scan collects all matching offers. Both save results locally. To run the automated checks:
+Local CVs, profiles, databases, model files, and API keys are kept outside version control.
 
-```bash
-.venv/bin/python -m pytest -q
-.venv/bin/ruff check .
-```
+## For the curious
 
-## Repository layout
-
-- `src/job_scout/`: application, collectors, models, storage, and web dashboard
-- `config/`: source settings and synthetic demo inputs
-- `tests/`: automated tests
-- `docs/golden-dataset/v1/`: public synthetic evaluation data
-- `.env.example`: configuration template without credentials
-
-Keep the app on a private local interface. Do not commit CVs, profile data, SQLite databases, or API keys.
+Local experiments compared Qwen, Gemma, Bielik, Granite, and other small models on reviewed Polish and English offers. Short classifier outputs reduced latency but did not reliably separate software roles from applied AI work. A Qwen classifier followed by a Gemma fit assessment did not improve that first decision. The current implementation uses a source-backed duty rule alongside one evidence-checked assessment and keeps ambiguous cases for human review.

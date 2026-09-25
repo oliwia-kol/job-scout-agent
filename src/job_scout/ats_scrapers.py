@@ -9,7 +9,7 @@ import re
 from abc import ABC, abstractmethod
 from html import unescape
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urlencode, urljoin, urlparse
 
 import httpx
 from bs4 import BeautifulSoup
@@ -81,6 +81,8 @@ class CleanJob(BaseModel):
     published_at: str | None = None
     raw_sha256: str
     extraction_method: str
+    role_direction: str | None = None
+    role_reason: str | None = None
     raw_payload: str = Field(default="", exclude=True, repr=False)
     raw_content_type: str = Field(default="text/html", exclude=True)
 
@@ -247,6 +249,7 @@ def extract_page_title_and_text(html: str, fallback_title: str) -> tuple[str, st
 
 
 PRIMARY_ROLE_SECTION_MARKERS = (
+    "the work",
     "about the role",
     "job description",
     "description we are",
@@ -258,6 +261,9 @@ PRIMARY_ROLE_SECTION_MARKERS = (
     "key responsibilities",
     "zadania na stanowisku",
     "zakres obowiązków",
+    "zakres prac:",
+    "twoje zadania",
+    "obowiązki",
 )
 FALLBACK_ROLE_SECTION_MARKERS = ("your role", "in this role", "the role", "responsibilities")
 END_MARKERS = (
@@ -283,11 +289,14 @@ ANALYSIS_STOP_MARKERS = (
     "oferujemy",
 )
 RESPONSIBILITY_SECTION_MARKERS = (
+    "the work",
+    "you will:",
     "about the role",
     "job description",
     "your mission",
     "your future role:",
     "tasks:",
+    "your tasks",
     "in this position, you will",
     "in this position you will",
     "what you will do",
@@ -300,6 +309,9 @@ RESPONSIBILITY_SECTION_MARKERS = (
     "your responsibilities",
     "zadania na stanowisku",
     "zakres obowiązków",
+    "zakres prac:",
+    "twoje zadania",
+    "obowiązki",
 )
 REQUIREMENT_SECTION_MARKERS = (
     "what you’ll need to succeed in this role",
@@ -312,6 +324,7 @@ REQUIREMENT_SECTION_MARKERS = (
     "must have tech stack",
     "experience and skills you need",
     "your profile:",
+    "your profile",
     "who is this role for?",
     "what we're looking for:",
     "what we’re looking for:",
@@ -439,11 +452,19 @@ def build_analysis_text(description: str) -> tuple[str, int]:
 
 
 def _first_marker_position(
-    lowered: str, markers: tuple[str, ...], *, start: int = 0
+    text: str, markers: tuple[str, ...], *, start: int = 0
 ) -> tuple[int, str] | None:
-    found = [
-        (position, marker) for marker in markers if (position := lowered.find(marker, start)) >= 0
-    ]
+    lowered = text.casefold()
+    found = []
+    for marker in markers:
+        position = lowered.find(marker, start)
+        while position >= 0 and marker == "requirements" and (
+            not text[position].isupper()
+            or (position > 0 and text[position - 1].isalpha())
+        ):
+            position = lowered.find(marker, position + len(marker))
+        if position >= 0:
+            found.append((position, marker))
     return min(found, key=lambda item: (item[0], -len(item[1])), default=None)
 
 
@@ -451,18 +472,23 @@ def extract_role_sections(description: str) -> tuple[str, str]:
     """Extract explicitly labelled duties and requirements without an LLM."""
     plain = html_to_text(description) if "<" in description and ">" in description else description
     lowered = plain.casefold()
-    responsibility_start = _first_marker_position(lowered, RESPONSIBILITY_SECTION_MARKERS)
-    requirement_start = _first_marker_position(lowered, REQUIREMENT_SECTION_MARKERS)
+    responsibility_start = _first_marker_position(plain, RESPONSIBILITY_SECTION_MARKERS)
+    requirement_start = _first_marker_position(plain, REQUIREMENT_SECTION_MARKERS)
 
     responsibilities = ""
     if responsibility_start:
         start, marker = responsibility_start
         content_start = start + len(marker)
-        end_candidates = [
+        end_candidates = (
+            [requirement_start[0]]
+            if requirement_start and requirement_start[0] > content_start
+            else []
+        )
+        end_candidates.extend(
             position
-            for candidate in REQUIREMENT_SECTION_MARKERS + ANALYSIS_STOP_MARKERS
+            for candidate in ANALYSIS_STOP_MARKERS
             if (position := lowered.find(candidate, content_start)) >= 0
-        ]
+        )
         end = min(end_candidates, default=len(plain))
         responsibilities = compact_text(plain[content_start:end]).strip(" :;-")
 
@@ -475,6 +501,8 @@ def extract_role_sections(description: str) -> tuple[str, str]:
             for candidate in ANALYSIS_STOP_MARKERS + END_MARKERS
             if (position := lowered.find(candidate, content_start)) >= 0
         ]
+        if responsibility_start and responsibility_start[0] > content_start:
+            end_candidates.append(responsibility_start[0])
         end = min(end_candidates, default=len(plain))
         requirements = compact_text(plain[content_start:end]).strip(" :;-")
 
@@ -713,6 +741,58 @@ class BrowserAdapter(SourceAdapter):
         return jobs
 
 
+class JustJoinAdapter(SourceAdapter):
+    """Discover public AI/ML listings using the site's numbered HTML pages."""
+
+    async def discover(self) -> list[DiscoveredJob]:
+        base = str(self.source.career_url).split("?", 1)[0]
+        max_pages = max(1, int(self.source.options.get("max_pages", 100)))
+        total_pages = max_pages
+        jobs: dict[str, DiscoveredJob] = {}
+        for page_number in range(1, max_pages + 1):
+            response = await self.http.get(f"{base}?{urlencode({'page': page_number})}")
+            if page_number == 1 and "max_pages" not in self.source.options:
+                pages = [
+                    int(value) for value in re.findall(r"(?:[?&]|&amp;)page=(\d+)", response.text)
+                ]
+                total_pages = min(max(pages, default=1), max_pages)
+            soup = BeautifulSoup(response.text, "html.parser")
+            anchors = soup.select('a.offer_list_offer_title_link[href*="/job-offer/"]')
+            if not anchors:
+                raise SourceError(f"Just Join IT page {page_number} has no job cards")
+            added = 0
+            for anchor in anchors:
+                url = str(anchor.get("href", "")).split("?", 1)[0]
+                if not url.startswith("https://justjoin.it/job-offer/") or url in jobs:
+                    continue
+                card = anchor.find_parent("div", class_=re.compile(r"mui-hj05nv"))
+                card_paragraphs = card.find_all("p") if card else []
+                company_tag = card_paragraphs[0] if card_paragraphs else None
+                company = compact_text(company_tag.get_text(" ", strip=True)) if company_tag else ""
+                if not company:
+                    raise SourceError(f"Just Join IT card lacks employer: {url}")
+                slug = url.rstrip("/").rsplit("/", 1)[-1]
+                jobs[url] = DiscoveredJob(
+                    source_id=self.source.id,
+                    company=company,
+                    external_id=slug,
+                    title=compact_text(anchor.get_text(" ", strip=True)),
+                    url=url,
+                    location_hint=(
+                        compact_text(card_paragraphs[1].get_text(" ", strip=True))
+                        if len(card_paragraphs) > 1
+                        else None
+                    ),
+                    metadata={"justjoin": True},
+                )
+                added += 1
+            if page_number > 1 and added == 0:
+                raise SourceError(f"Just Join IT page {page_number} repeats earlier results")
+            if page_number >= total_pages:
+                break
+        return list(jobs.values())
+
+
 class EmbeddedERecruiterAdapter(SourceAdapter):
     """Read eRecruiter offers embedded in server-rendered application state."""
 
@@ -868,6 +948,12 @@ async def clean_job(job: DiscoveredJob, http: HttpClient) -> CleanJob:
     if record:
         title = value_to_text(record.get("title")) or job.title
         description = value_to_text(record.get("description"))
+        organization = record.get("hiringOrganization")
+        company = (
+            value_to_text(organization.get("name"))
+            if job.metadata.get("justjoin") and isinstance(organization, dict)
+            else job.company
+        ) or job.company
         locations = json_ld_locations(record)
         employment_type = value_to_text(record.get("employmentType")) or None
         published_at = record.get("datePosted")
@@ -888,6 +974,8 @@ async def clean_job(job: DiscoveredJob, http: HttpClient) -> CleanJob:
         title, description, meta_locs = extract_page_title_and_text(raw, job.title)
         locations = meta_locs or ([job.location_hint] if job.location_hint else [])
         employment_type = published_at = None
+    if not record:
+        company = job.company
     if not description:
         raise SourceError(f"empty cleaned description for {job.url}")
     blocked_markers = ("performing security verification", "enable javascript and cookies")
@@ -895,26 +983,28 @@ async def clean_job(job: DiscoveredJob, http: HttpClient) -> CleanJob:
         raise SourceError(f"anti-bot page returned instead of job description for {job.url}")
     analysis_text, removed_characters = build_analysis_text(description)
     supplemental_info = extract_supplemental_info(description)
-    return normalize_clean_job(CleanJob(
-        source_id=job.source_id,
-        company=job.company,
-        external_id=job.external_id,
-        title=title,
-        url=job.url,
-        locations=list(dict.fromkeys(filter(None, locations))),
-        description=description,
-        analysis_text=analysis_text,
-        removed_characters=removed_characters,
-        supplemental_info=supplemental_info,
-        employment_type=employment_type,
-        published_at=str(published_at) if published_at else None,
-        raw_sha256=hashlib.sha256(raw.encode()).hexdigest(),
-        extraction_method=method,
-        raw_payload=raw,
-        raw_content_type=(
-            "application/json" if method in {"detail_api", "embedded_api"} else "text/html"
-        ),
-    ))
+    return normalize_clean_job(
+        CleanJob(
+            source_id=job.source_id,
+            company=company,
+            external_id=job.external_id,
+            title=title,
+            url=job.url,
+            locations=list(dict.fromkeys(filter(None, locations))),
+            description=description,
+            analysis_text=analysis_text,
+            removed_characters=removed_characters,
+            supplemental_info=supplemental_info,
+            employment_type=employment_type,
+            published_at=str(published_at) if published_at else None,
+            raw_sha256=hashlib.sha256(raw.encode()).hexdigest(),
+            extraction_method=method,
+            raw_payload=raw,
+            raw_content_type=(
+                "application/json" if method in {"detail_api", "embedded_api"} else "text/html"
+            ),
+        )
+    )
 
 
 ADAPTERS: dict[str, type[SourceAdapter]] = {
@@ -928,6 +1018,7 @@ ADAPTERS: dict[str, type[SourceAdapter]] = {
     "browser": BrowserAdapter,
     "embedded_erecruiter": EmbeddedERecruiterAdapter,
     "epam": EpamAdapter,
+    "justjoin": JustJoinAdapter,
 }
 
 

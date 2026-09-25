@@ -62,17 +62,6 @@
       {{ content }}
     </main>
     {% if shell == "product" %}
-    <button class="bielik-fab" type="button" data-bielik-open aria-haspopup="dialog">Bielik</button>
-    <dialog class="bielik-dialog" data-bielik-dialog aria-labelledby="bielik-title">
-      <div class="bielik-dialog__head"><div><p class="eyebrow">Lokalny asystent</p><h2 id="bielik-title">Bielik</h2></div>
-        <button class="dialog-close" type="button" data-bielik-close aria-label="Zamknij">×</button></div>
-      <div class="bielik-transcript" data-bielik-transcript aria-live="polite"></div>
-      <p class="muted" data-bielik-state>Wybierz kontekst: ogólna pomoc, aktywny profil lub oferta.</p>
-      <form class="bielik-composer" data-bielik-form>
-        <textarea data-bielik-input required placeholder="Napisz wiadomość…"></textarea>
-        <button type="submit">Wyślij</button>
-      </form>
-    </dialog>
     <nav class="mobile-nav" aria-label="Główna nawigacja mobilna">
       {% for key, href, label in nav_items %}
       <a href="{{ href }}" data-nav="{{ key }}" {% if key == active %}aria-current="page" class="is-active"{% endif %}>

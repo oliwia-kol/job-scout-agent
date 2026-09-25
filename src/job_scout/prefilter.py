@@ -51,6 +51,7 @@ FOREIGN_ONLY = (
     "germany",
     "spain",
     "united kingdom",
+    "cyprus",
 )
 
 
@@ -65,6 +66,16 @@ class PrefilterResult(BaseModel):
 def infer_location(offer: CleanJob) -> LocationEligibility:
     location_text = " ".join(offer.locations).casefold()
     evidence = f"{location_text} {offer.analysis_text[-1200:].casefold()}"
+    if re.search(
+        r"\brelocat(?:ion|e)\s+to\s+(?:cyprus|germany|france|spain|united kingdom|usa)\b",
+        offer.title,
+        re.I,
+    ):
+        return LocationEligibility.INELIGIBLE
+    if any(marker in location_text for marker in REMOTE) and any(
+        marker in location_text for marker in POLAND
+    ):
+        return LocationEligibility.ELIGIBLE
     if any(marker in location_text for marker in WARSAW):
         return LocationEligibility.ELIGIBLE
     if any(marker in location_text for marker in OTHER_POLISH_CITIES):
